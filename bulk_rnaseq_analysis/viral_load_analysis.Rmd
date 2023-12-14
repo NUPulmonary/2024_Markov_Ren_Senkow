@@ -1,0 +1,307 @@
+---
+title: "Ct value analysis from BAL fluid samples in COVID-19 pts"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: to identify association between viral load and clinical outcomes throughout the course of SARS-CoV-2 pna
+---
+
+
+```{r}
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/") 
+# Load packages as per "rna_seq_bulk_cd8" file
+```
+
+# Set seed
+set.seed(8271)
+
+```{r}
+# Ct value analysis
+# Quantify total number of unifying cov samples in RNA-seq analysis 
+# Bulk RNA-seq (336 samples from 420 after QC/filtering)
+ct_cd8 <- cd8_samples_ordered_2 %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::select(tc_pt_study_id, Outcome, finite_day_of_intubation, Ct = Ct_N1)
+rownames(ct_cd8) = NULL
+
+ct_cd4 <- cd4_samples_ordered_2 %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::select(tc_pt_study_id, Outcome, finite_day_of_intubation, Ct = Ct_N1)
+rownames(ct_cd4) = NULL
+
+ct_treg <- treg_samples_ordered_2 %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::select(tc_pt_study_id, Outcome, finite_day_of_intubation, Ct = Ct_N1)
+rownames(ct_treg) = NULL
+
+ct_all <- full_join(ct_cd8, ct_cd4, by = "tc_pt_study_id") %>% 
+      full_join(., ct_treg, by = "tc_pt_study_id") %>% 
+      dplyr::select(tc_pt_study_id)
+
+# Which of these post-QC filtering RNA-seq samples are present in original (pre-QC filtering) RNA-seq dataset (90 unique tc_pt_id)
+ct_vec <- ct_all$tc_pt_study_id[ct_all$tc_pt_study_id %in% tcell_samples_bulkfacs_final$tc_pt_study_id]
+
+ct_samples <- match(ct_vec, tcell_samples_bulkfacs_final$tc_pt_study_id)
+ct_samples2 <- tcell_samples_bulkfacs_final[ct_samples, ]
+
+# Sanity check. Does 90 samples match sankey plot samples? Yes!
+allu <- allu_rna %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  distinct(tc_pt_study_id, .keep_all = T)
+
+
+# Add timing flag and remove undetermined (>40) values (46)
+ct_rna_samples <- ct_samples2 %>% 
+  dplyr::filter(Ct_N1 != "Undetermined") %>% 
+  dplyr::select(tc_pt_study_id, Outcome, day_of_intubation, Ct = Ct_N1) %>% 
+  dplyr::mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs")) 
+
+ct_rna_samples$Ct <- as.numeric(ct_rna_samples$Ct)
+```
+
+
+```{r}
+# Group data by Timing of BAL relative to intubation
+ct_rna_samples <- ct_rna_samples %>% 
+  dplyr::mutate(Sampling_time = 
+                  case_when(stri_detect_fixed(dayETT, "≤ 48hrs") ~ "Early",
+                            stri_detect_fixed(dayETT, "> 48hrs") ~ "Late",
+                            TRUE ~ "Default"))
+# Factor 
+ct_rna_samples$Sampling_time <- factor(ct_rna_samples$Sampling_time,
+                                levels = c("Early", "Late"))
+
+ct_rna_samples$Outcome <- factor(ct_rna_samples$Outcome,
+                                 levels = c("Discharged", "Deceased"))
+
+ct_rna_samples$dayETT <- factor(ct_rna_samples$dayETT,
+                                 levels = c("≤ 48hrs", "> 48hrs"))
+
+# Ct values
+ct_rna_samples_stats = ct_rna_samples %>% 
+  mutate(combined = factor(paste(Sampling_time, Outcome, sep = ", ")))
+
+ct_rna_samples_stats = pairwise.wilcox.test(ct_rna_samples_stats$Ct,
+                                              ct_rna_samples_stats$combined, 
+                                              p.adjust.method = "none",
+                                              exact = T) %>% 
+  tidy() %>% 
+  # dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+  #                 substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Early", group1) ~ 1,
+                                 grepl("Late", group1) ~ 2),
+                xmax = case_when(grepl("Early", group2) ~ 1,
+                                 grepl("Late", group2) ~ 2),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+ct_rna_samples_stats <- ct_rna_samples_stats[c(5,4,3,2), ] 
+
+ct_rna_samples_stats <- ct_rna_samples_stats %>% 
+  dplyr::mutate(yval = seq(from = 40, by = 2.5, length.out = nrow(.)))
+
+
+# Plot
+cts <- ggplot(ct_rna_samples, aes(y=Ct, x=Sampling_time)) +
+  geom_boxplot(aes(fill = Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = ct_rna_samples_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 1.5), breaks = seq(0, 40, by = 5)) +
+  labs(title="COVID-19 BAL samples", 
+       subtitle="",
+       x="",
+       y="Ct value")
+
+cts
+
+# Save
+ ggsave(cts, filename = "cts.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 7, units = "in")
+```
+
+
+
+```{r}
+# Add timing flag and remove undetermined (>40) values (33). Remaining 11 were NA
+ct_rna_samples_und <- ct_samples2 %>% 
+  dplyr::filter(Ct_N1 == "Undetermined") %>% 
+  dplyr::select(tc_pt_study_id, Outcome, day_of_intubation, Ct = Ct_N1) %>% 
+  dplyr::mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs")) 
+
+ct_rna_samples_und <- ct_rna_samples_und %>% 
+  dplyr::mutate(Sampling_time = 
+                  case_when(stri_detect_fixed(dayETT, "≤ 48hrs") ~ "Early",
+                            stri_detect_fixed(dayETT, "> 48hrs") ~ "Late",
+                            TRUE ~ "Default"))
+# Factor 
+ct_rna_samples_und$Sampling_time <- factor(ct_rna_samples_und$Sampling_time,
+                                levels = c("Early", "Late"))
+
+ct_rna_samples_und$Outcome <- factor(ct_rna_samples_und$Outcome,
+                                 levels = c("Discharged", "Deceased"))
+
+ct_und_counts <- ct_rna_samples_und %>% 
+  dplyr::group_by(Outcome, Sampling_time) %>% 
+  summarise(n = n())
+
+# Plot 
+cts_und <- ggplot(ct_und_counts, aes(x=Sampling_time, y=n, fill=Outcome) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="Ct value (> 40) in COVID-19 BAL samples", 
+       subtitle="",
+       x="",
+       y="Number of BAL samples")
+
+cts_und
+
+# Save
+ ggsave(cts_und, filename = "cts_und.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 7, units = "in")
+```
+
+
+```{r}
+# Plot with cor plot
+cts_cor <- ggplot(ct_rna_samples, 
+               aes(x = day_of_intubation, 
+                   y = Ct)) + 
+  geom_point(aes(size = 0.5, color = Outcome, alpha = 1/5)) + 
+  scale_color_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  guides(size = "none") +
+  guides(alpha = "none") +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(aes(fill = Outcome, color = Outcome),
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.1,
+              size = 1.5) +
+  scale_y_reverse(limits=c(50,0)) +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  stat_cor(aes(color = Outcome),
+           method = "spearman",
+           size = 5) +
+  scale_color_manual(values = 
+                       c("Discharged" = outcome_pal[2],
+                         "Deceased" = outcome_pal[5])) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(subtitle="",
+       y="Ct value", 
+       x="Days from intubation", 
+       title="COVID-19 BAL samples") 
+
+cts_cor
+
+# Save PDF
+ggsave(cts_cor, filename = "cts_cor.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 6, units = "in")
+```
+
+
+```{r}
+ct_rna_samples <- ct_samples2 %>% 
+  dplyr::select(tc_pt_study_id, study_id, Outcome, day_of_intubation, COVID_19, Ct = Ct_N1) %>% 
+  dplyr::mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs")) 
+
+ct_rna_samples <- inner_join(ct_rna_samples, tcr_anonym, by = c("study_id" = "script_id")) 
+# 42 samples (21 undetermined, 3 NAs, 18 with values <40)
+
+# Add values for undetermined samples (>40) and timing flag
+ct_rna_samples$Ct <- sub("Undetermined", "45", ct_rna_samples$Ct)
+# 3 NAs for samples F, G and M
+
+ct_rna_samples$Ct <- as.numeric(ct_rna_samples$Ct)
+
+# Plot by timinig and Ct values
+ct_rna2 <- ggplot(ct_rna_samples, aes(y = Ct, x = day_of_intubation)) +
+  geom_point(aes(color = Outcome), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  facet_wrap(~ study_id) +
+  scale_color_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_hline(yintercept = 40, size = 1, color = "black") +
+  labs(title="COVID-19 BAL samples", 
+       subtitle="",
+       x="Days from intubation",
+       y="Ct value")
+
+ct_rna2
+
+# Save PDF
+ggsave(ct_rna2, filename = "ct_rna2.pdf", dpi = 300, device = cairo_pdf,
+       width = 12, height = 10, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC"
+
+cts_tot2 <- cts + cts_und + cts_cor +
+  plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical')
+
+cts_tot2
+
+# Save PDF
+ggsave(cts_tot2, filename = "cts_tot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 12, height = 7, units = "in")
+```
+

@@ -1,0 +1,785 @@
+---
+title: "Differential expression analysis of COVID-19 samples"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: to identify distinctive transcriptional signatures associated with timing of BAL throughout the course of severe SARS-CoV-2 Pna 
+---
+
+
+```{r}
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/") 
+
+library(dplyr)
+library(edgeR)
+library(stringi)
+library(Cairo)
+library(ggsci)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(devtools)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(ggnewscale)
+library(patchwork)
+
+# Set seed
+set.seed(8271)
+
+# Palettes
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+antigen_pal2 = pal_d3("category20")(20)
+```
+
+
+```{r}
+## Let's analyze only by COVID-19 samples and timinig of BAL
+# Get CD8 samples from COVID-19 pts only
+covid_cd8_samples <- cd8_samples_ordered_2 %>% 
+  filter(pna_type_verified == "COVID-19")
+rownames(covid_cd8_samples) <- NULL
+
+# Add timing
+covid_cd8_samples <- covid_cd8_samples %>% 
+  dplyr::mutate(timing_bal = ifelse(day_of_intubation <= 2, "Early", "Late"))
+
+# Add combined factor for timing and outcome
+covid_cd8_samples <- covid_cd8_samples %>% 
+  dplyr::mutate(combined = factor(paste(outcome, timing_bal, sep = "")))
+
+## Make sure samples match order between counts table and metadata table
+# Which samples belong to CD8 from all counts table
+cd8_vec2 <- covid_cd8_samples$sample_id[covid_cd8_samples$sample_id %in% colnames(all_samples_cts_edger)]
+
+# Which order
+cd8_cov_counts_ordered <- match(cd8_vec2, colnames(all_samples_cts_edger))
+
+# Apply to matrix
+cd8_cov_counts_ordered <- all_samples_cts_edger[, cd8_cov_counts_ordered]
+
+# Order samples in metadata
+cd8_cov_md_ordered <- match(cd8_vec2, covid_cd8_samples$sample_id)
+cd8_cov_samples_ordered <- covid_cd8_samples[cd8_cov_md_ordered, ]
+
+# Verify
+cd8_cov_samples_ordered$sample_id == colnames(cd8_cov_counts_ordered)
+
+# Verify again
+sum(cd8_cov_samples_ordered$sample_id != colnames(cd8_cov_counts_ordered))
+
+```
+
+```{r}
+## Run edgeR 
+# Define groups
+group = factor(covid_cd8_samples$timing_bal)
+
+# Define DGEList  
+edger_cov_cd8 <- DGEList(counts = cd8_cov_counts_ordered, group = group) 
+
+# Calculate normalization factors
+edger_cov_cd8 <- calcNormFactors(edger_cov_cd8)
+
+# Filtering 
+keep <- filterByExpr(edger_cov_cd8)
+edger_cov_cd8 <- edger_cov_cd8[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_cov_cd8$samples$lib.size <- colSums(edger_cov_cd8$counts)
+
+# Vizualize library size
+barplot(edger_cov_cd8$samples$lib.size*1e-6, 
+        names= 1:72, 
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL")
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_cov_cd8 <- calcNormFactors(edger_cov_cd8)
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_cov_cd8, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+# Get normalized gene counts for visualization and inspection of samples
+edger_cov_cd8_norm <- cpm(edger_cov_cd8, log = TRUE, prior.count = 2)
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+cd8_col <- c("red", "blue")[group]
+points <- c(1,2)[group]
+plotMDS(edger_cov_cd8, col = cd8_col, gene.selection = "common") # add pch = points if want symbols instead of sample names
+```
+
+
+```{r}
+## GLM approach 
+# Design matrix (+0 so this is used for pairwise comparisons)
+design <- model.matrix(~ 0 + group, data = edger_cov_cd8$samples)
+colnames(design) <- c("Early", "Late")
+design
+
+# Estimating Dispersion, GLM
+#To estimate common dispersion and tagwise dispersions in one run (recommended):
+edger_cov_cd8 <- estimateDisp(edger_cov_cd8, design, robust=TRUE)
+
+# Plot BCV
+plotBCV(edger_cov_cd8)
+
+# Perform GLM model fitting, a negative binomial generalized log-linear model to counts
+fit <- glmFit(edger_cov_cd8, design, robust=TRUE) 
+
+# Make contrasts
+contrasts <- makeContrasts(
+  EarlyvsLate = Early - Late,
+  levels = design)
+```
+
+```{r}
+# Pairwise comparisons by outcome
+early_vs_late_cov_cd8 <- glmLRT(fit, contrast = contrasts[, "EarlyvsLate"])
+topTags_early_vs_late_cov_cd8 <- topTags(early_vs_late_cov_cd8, n = Inf, adjust.method = "fdr")
+topTags_early_vs_late_cov_cd8 <- as.data.frame(topTags_early_vs_late_cov_cd8) %>% 
+  rownames_to_column("gene_name")
+
+topTags_early_vs_late_cov_cd8 <- topTags_early_vs_late_cov_cd8 %>%  
+  dplyr::mutate(Significant = 
+                  case_when(logFC < 0 & FDR < 0.05 ~ "Downregulated",
+                            logFC > 0 & FDR < 0.05 ~ "Upregulated",
+                            TRUE ~ "Not significant")) %>% 
+  dplyr::arrange(FDR) 
+
+topTags_early_vs_late_cov_cd8_fdr05 <- topTags_early_vs_late_cov_cd8 %>% 
+  dplyr::filter(FDR < 0.05)
+
+topTags_early_vs_late_cov_cd8_up <- topTags_early_vs_late_cov_cd8 %>% 
+  dplyr::filter(Significant == "Upregulated")
+
+topTags_early_vs_late_cov_cd8_dn <- topTags_early_vs_late_cov_cd8 %>% 
+  dplyr::filter(Significant == "Downregulated")
+
+# Save
+write.csv(topTags_early_vs_late_cov_cd8, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd8.csv")
+
+write.csv(topTags_early_vs_late_cov_cd8_fdr05, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd8_fdr05.csv")
+
+write.csv(topTags_early_vs_late_cov_cd8_up, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd8_up.csv")
+
+write.csv(topTags_early_vs_late_cov_cd8_dn, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd8_dn.csv")
+```
+
+```{r}
+# MA plot
+cd8_bal_cov_plot <- ggplot(topTags_early_vs_late_cov_cd8, aes(x = logCPM, y = logFC)) + 
+  geom_point(aes(fill = Significant, color = Significant), shape = 21, stroke = 0.5, size = 2.5) +
+  geom_label_repel(
+    aes(label = gene_name, fontface = "italic"),
+    data = subset(topTags_early_vs_late_cov_cd8, 
+                  gene_name %in% c("MX1","OAS2","OAS3","IFI44L", "IFIT1", "IFIT2", "IFIT3", "ISG15", "ISG20", "MX2","IFITM1", "EPSTI1", "IFI44", "HERC5", "HERC6", "ADAR", "DDX60", "DDX60L", "HELZ2", "SPATS2L", # IFN
+                                   "GZMB","NME1",  # activation 
+                                   "HIST1H3C", "TUBA1B", # proliferation
+                                   "ITM2C","GNPTAB", # exhaustion
+                                   "ITGB1",    # migration
+                                   "PDE4DIP", "EIF2AK2", "SAMD9",
+                                   "CCL5", "ATXN1", "ABCG1", "KIR2DL3", "ITM2C", "TC2N", "ABCG1")),  
+                       box.padding = 0.5,
+                       nudge_y = 0.2,
+                       direction = "both",
+                       segment.curvature = 0.1,
+                       max.iter = 1e5, max.time = 1,
+                       max.overlaps = Inf, force = 100, force_pull = 100,
+    seed = 5000) +
+  # scale_x_log10() +
+  theme_bw() +
+  ylim(-5,5) +
+  scale_color_manual(values = 
+                       c("Not significant" = "gray", 
+                         "Upregulated" = "#BC3C29FF",
+                         "Downregulated" = "#0072B5FF")) +
+  scale_fill_manual(values = 
+                      c("Not significant" = "gray", 
+                        "Upregulated" = "#BC3C29FF",
+                        "Downregulated" = "#0072B5FF")) +
+  annotate("text", x = 14, y = 4.5, size = 5, label = sprintf("Up in Early samples: %d", sum(topTags_early_vs_late_cov_cd8$Significant == "Upregulated"))) +
+  annotate("text", x = 14, y = -4.5, size = 5, label = sprintf("Up in Late samples: %d", sum(topTags_early_vs_late_cov_cd8$Significant == "Downregulated"))) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0, hjust = 0),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  labs(title="Early vs Late alveolar CD8 T cell samples in COVID-19 patients", 
+       y="log2 fold change",
+       x="Average expression") +
+  theme(legend.position = "none") 
+
+cd8_bal_cov_plot
+
+# # Save as PDF
+# Save PDF
+ggsave(cd8_bal_cov_plot, filename = "cd8_bal_cov_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/cd8_bal_cov_plot.pdf", width=8, height=6)
+print(cd8_bal_cov_plot)
+dev.off()
+```
+
+```{r}
+# Let's extract genes of interest for heatmap
+edger_cov_cd8_ifn <- edger_cov_cd8_norm[c("MX1","OAS2","OAS3","IFI44L", "IFIT1", "IFIT2", "IFIT3", "ISG15", "ISG20", "MX2","IFITM1", "EPSTI1", "IFI44", "HERC5", "HERC6", "ADAR", "DDX60", "DDX60L", "HELZ2", "SPATS2L"), ]
+  
+## Make sure samples match order between counts table and metadata
+# Which samples belong to CD8 from all counts table
+cd8_vec2 <- cd8_cov_samples_ordered$sample_id[cd8_cov_samples_ordered$sample_id %in% colnames(edger_cov_cd8_ifn)]
+
+# Which order
+cd8_cov_counts_ordered_ifn <- match(cd8_vec2, colnames(edger_cov_cd8_ifn))
+
+# Apply to matrix
+cd8_cov_counts_ordered_ifn <- edger_cov_cd8_ifn[, cd8_cov_counts_ordered_ifn]
+
+# Order samples in metadata
+cd8_cov_md_ordered <- match(cd8_vec2, cd8_cov_samples_ordered$sample_id)
+cd8_cov_samples_ordered <- cd8_cov_samples_ordered[cd8_cov_md_ordered, ]
+
+# Verify
+cd8_cov_samples_ordered$sample_id == colnames(cd8_cov_counts_ordered_ifn)
+
+# Verify again
+sum(cd8_cov_samples_ordered$sample_id != colnames(cd8_cov_counts_ordered_ifn))
+  
+
+# Analyze interferon signature in early samples only grouped by outcome
+cd8_cov_samples_ordered_early <- cd8_cov_samples_ordered %>%
+  dplyr::filter(timing_bal == "Early")
+```
+
+```{r}
+# Match
+rownames(cd8_cov_samples_ordered) <- cd8_cov_samples_ordered$sample_id
+colnames(cd8_cov_counts_ordered_ifn) <- cd8_cov_samples_ordered$sample_id
+
+# Scale values (SD of 1 and mean of 0 aka beautiful gaussian normal distribution)
+cd8_cov_counts_ordered_ifn <-  t(scale(t(cd8_cov_counts_ordered_ifn))) 
+
+# Annotation
+annotation_columns <- cd8_cov_samples_ordered %>% 
+  dplyr::select(Outcome,
+                'Infection status' = Infection_status,
+                 finite_day_of_intubation) %>% 
+  arrange(finite_day_of_intubation) %>% 
+  dplyr::rename('Days from intubation' = finite_day_of_intubation) 
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha2 = HeatmapAnnotation(df = annotation_columns,
+                       col = list(Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+
+
+
+# Plot
+set.seed(8271)
+cd8_rna_ifn <- Heatmap(mat = cd8_cov_counts_ordered_ifn[, rownames(annotation_columns)], 
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = TRUE,
+               cluster_columns = TRUE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = TRUE,
+               top_annotation = ha2,
+               # row_km = 2,
+               # row_title = "",
+               column_title = NULL,
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd8_rna_ifn 
+
+cd8_rna_unclust   <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd8_rna_unclust , 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd8_rna_unclust 
+
+```
+
+```{r}
+## Let's analyze only by COVID-19 samples and timinig of BAL
+# Get CD4 samples from COVID-19 pts only
+covid_cd4_samples <- cd4_samples_ordered_2 %>% 
+  filter(pna_type_verified == "COVID-19")
+rownames(covid_cd4_samples) <- NULL
+
+# Add timing
+covid_cd4_samples <- covid_cd4_samples %>% 
+  dplyr::mutate(timing_bal = ifelse(day_of_intubation <= 2, "Early", "Late"))
+
+# Add combined factor for timing and outcome
+covid_cd4_samples <- covid_cd4_samples %>% 
+  dplyr::mutate(combined = factor(paste(outcome, timing_bal, sep = "")))
+
+## Make sure samples match order between counts table and metadata
+# Which samples belong to CD8 from all counts table
+cd4_vec2 <- covid_cd4_samples$sample_id[covid_cd4_samples$sample_id %in% colnames(all_samples_cts_edger)]
+
+# Which order
+cd4_cov_counts_ordered <- match(cd4_vec2, colnames(all_samples_cts_edger))
+
+# Apply to matrix
+cd4_cov_counts_ordered <- all_samples_cts_edger[, cd4_cov_counts_ordered]
+
+# Order samples in metadata
+cd4_cov_md_ordered <- match(cd4_vec2, covid_cd4_samples$sample_id)
+cd4_cov_samples_ordered <- covid_cd4_samples[cd4_cov_md_ordered, ]
+
+# Verify
+cd4_cov_samples_ordered$sample_id == colnames(cd4_cov_counts_ordered)
+
+# Verify again
+sum(cd4_cov_samples_ordered$sample_id != colnames(cd4_cov_counts_ordered))
+```
+
+```{r}
+## Run edgeR 
+# Define groups
+group = factor(covid_cd4_samples$timing_bal)
+
+# Define DGEList  
+edger_cov_cd4 <- DGEList(counts = cd4_cov_counts_ordered, group = group) 
+
+# Calculate normalization factors
+edger_cov_cd4 <- calcNormFactors(edger_cov_cd4)
+
+# Filtering 
+keep <- filterByExpr(edger_cov_cd4)
+edger_cov_cd4 <- edger_cov_cd4[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_cov_cd4$samples$lib.size <- colSums(edger_cov_cd4$counts)
+
+# Vizualize library size
+barplot(edger_cov_cd4$samples$lib.size*1e-6, 
+        names= 1:81, 
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL")
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_cov_cd4 <- calcNormFactors(edger_cov_cd4)
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_cov_cd4, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+# Get normalized gene counts for visualization and inspection of samples
+edger_cov_cd4_norm <- cpm(edger_cov_cd4, log = TRUE)
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+cd4_col <- c("red", "blue")[group]
+points <- c(1,2)[group]
+plotMDS(edger_cov_cd4, col = cd4_col, gene.selection = "common") # add pch = points if want symbols instead of sample names
+```
+
+
+```{r}
+## GLM approach 
+# Design matrix (+0 so this is used for pairwise comparisons)
+design <- model.matrix(~ 0 + group, data = edger_cov_cd4$samples)
+colnames(design) <- c("Early", "Late")
+design
+
+# Estimating Dispersion, GLM
+#To estimate common dispersion and tagwise dispersions in one run (recommended):
+edger_cov_cd4 <- estimateDisp(edger_cov_cd4, design, robust=TRUE)
+
+# Plot BCV
+plotBCV(edger_cov_cd4)
+
+# Perform GLM model fitting, a negative binomial generalized log-linear model to counts
+fit <- glmFit(edger_cov_cd4, design, robust=TRUE) 
+
+# Make contrasts
+contrasts <- makeContrasts(
+  EarlyvsLate = Early - Late,
+  levels = design)
+```
+
+```{r}
+# Pairwise comparisons by outcome
+early_vs_late_cov_cd4 <- glmLRT(fit, contrast = contrasts[, "EarlyvsLate"])
+topTags_early_vs_late_cov_cd4 <- topTags(early_vs_late_cov_cd4, n = Inf, adjust.method = "fdr")
+topTags_early_vs_late_cov_cd4 <- as.data.frame(topTags_early_vs_late_cov_cd4) %>% 
+  rownames_to_column("gene_name")
+
+topTags_early_vs_late_cov_cd4 <- topTags_early_vs_late_cov_cd4 %>%  
+  dplyr::mutate(Significant = 
+                  case_when(logFC < 0 & FDR < 0.05 ~ "Downregulated",
+                            logFC > 0 & FDR < 0.05 ~ "Upregulated",
+                            TRUE ~ "Not significant")) %>% 
+  dplyr::arrange(FDR) 
+# None after FDR
+
+topTags_early_vs_late_cov_cd4_fdr05 <- topTags_early_vs_late_cov_cd4 %>% 
+  dplyr::filter(FDR < 0.05)
+
+topTags_early_vs_late_cov_cd4_up <- topTags_early_vs_late_cov_cd4 %>% 
+  dplyr::filter(Significant == "Upregulated")
+
+topTags_early_vs_late_cov_cd4_dn <- topTags_early_vs_late_cov_cd4 %>% 
+  dplyr::filter(Significant == "Downregulated")
+
+# Save
+write.csv(topTags_early_vs_late_cov_cd4, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd4.csv")
+
+write.csv(topTags_early_vs_late_cov_cd4_fdr05, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd4_fdr05.csv")
+
+write.csv(topTags_early_vs_late_cov_cd4_up, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd4_up.csv")
+
+write.csv(topTags_early_vs_late_cov_cd4_dn, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_early_vs_late_cov_cd4_dn.csv")
+```
+
+
+```{r}
+# MA plot
+cd4_bal_cov_plot <- ggplot(topTags_early_vs_late_cov_cd4, aes(x = logCPM, y = logFC)) + 
+  geom_point(aes(fill = Significant, color = Significant), shape = 21, stroke = 0.5, size = 2.5) +
+  geom_label_repel(
+    aes(label = gene_name, fontface = "italic"),
+    data = subset(topTags_early_vs_late_cov_cd4, 
+                  gene_name %in% c("MX1","RSAD2", "IFIH1", "OAS2","OAS3","IFI44L", "IFIT1", "IFIT3", "ISG15", "ISG20", "ZCCHC2", "MX2","IFITM1", "IFI44", "DDX60", "IFI6", "DDX60L", "TRIM26", "USP18", "PARP9", "STAT2", # IFN type I and II
+                                   "IL10", "GZMB", "PRF1", "LY6E", "BATF3",
+                                   "CSF2","ITGB1","PDE7B",  "ZFP36L1", "PPAP2B", "MIR181A1HG", "SOD2" )),  # Elife  rudensky paper on ZFP36L1 - regulates IFNy, IL17, IL2 - KO mice have higher levels
+                       box.padding = 0.5,
+                       nudge_y = 0.1,
+                       direction = "both",
+                       segment.curvature = 0.1,
+                       max.iter = 1e5, max.time = 1,
+                       max.overlaps = Inf, force = 100, force_pull = 100,
+    seed = 5000) +
+  # scale_x_log10() +
+  theme_bw() +
+  ylim(-6,6) +
+  scale_color_manual(values = 
+                       c("Not significant" = "gray", 
+                         "Upregulated" = "#BC3C29FF",
+                         "Downregulated" = "#0072B5FF")) +
+  scale_fill_manual(values = 
+                      c("Not significant" = "gray", 
+                        "Upregulated" = "#BC3C29FF",
+                        "Downregulated" = "#0072B5FF")) +
+  annotate("text", x = 14, y = 4.5, size = 5, label = sprintf("Up in Early samples: %d", sum(topTags_early_vs_late_cov_cd4$Significant == "Upregulated"))) +
+  annotate("text", x = 14, y = -4.5, size = 5, label = sprintf("Up in Late samples: %d", sum(topTags_early_vs_late_cov_cd4$Significant == "Downregulated"))) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0, hjust = 0),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  labs(title="Early vs Late alveolar CD4 T cell samples in COVID-19 patients", 
+       y="log2 fold change",
+       x="Average expression") +
+  theme(legend.position = "none") 
+
+cd4_bal_cov_plot
+
+# Save PDF
+ggsave(cd4_bal_cov_plot, filename = "cd4_bal_cov_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+
+
+```{r}
+## Let's analyze CD4+ and CD8+ T cells
+# Bind T cell subset matrices
+counts_all <- cbind(cd8_counts_ordered_2, cd4_counts_ordered_2)
+
+# Bind T cell subset metadata
+rna_meta_all <- bind_rows(cd8_samples_ordered_2, cd4_samples_ordered_2)
+
+# Add timing
+rna_meta_all <- rna_meta_all %>% 
+  dplyr::mutate(timing_bal = ifelse(finite_day_of_intubation <= 2, "Early", "Late"))
+
+# Filter only early samples
+rna_meta_all <- rna_meta_all %>%
+  dplyr::filter(pna_type_verified == "COVID-19")
+
+# Match counts and metadata samples
+rna_vec <- rna_meta_all$sample_id[rna_meta_all$sample_id %in% colnames(counts_all)]
+
+# Which order
+rna_cov_counts_ordered <- match(rna_vec, colnames(counts_all))
+
+# Apply to matrix
+rna_cov_counts_ordered <- counts_all[, rna_cov_counts_ordered]
+
+# Order samples in metadata
+rna_cov_md_ordered <- match(rna_vec, rna_meta_all$sample_id)
+rna_cov_samples_ordered <- rna_meta_all[rna_cov_md_ordered, ]
+
+# Verify
+rna_cov_samples_ordered$sample_id == colnames(rna_cov_counts_ordered)
+
+# Verify again
+sum(rna_cov_samples_ordered$sample_id != colnames(rna_cov_counts_ordered))
+
+
+# Steroids data. Upload Nik's table
+nik_steroids_orig <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/11_carpediem_luisa.csv")
+
+# Select hydrocortisone cumulative dose
+nik_steroids <- nik_steroids_orig %>% 
+  dplyr::select(bal_barcode, hydrocort_equiv_since_adm) %>% 
+  drop_na()
+
+# Join with counts
+rna_cov_samples_ordered_roids <- left_join(rna_cov_samples_ordered, nik_steroids, by = c("tc_pt_study_id" = "bal_barcode"))
+
+# Order
+rownames(rna_cov_samples_ordered_roids) <- rna_cov_samples_ordered_roids$sample_id
+
+sum(rna_cov_samples_ordered_roids$sample_id != colnames(rna_cov_counts_ordered))
+rna_cov_samples_ordered_roids$sample_id == colnames(rna_cov_counts_ordered)
+```
+
+```{r}
+## Run edgeR 
+# Define groups
+group = factor(rna_cov_samples_ordered_roids$timing_bal)
+
+# Define DGEList  
+edger_cov_all <- DGEList(counts = rna_cov_counts_ordered, group = group) 
+
+# Calculate normalization factors
+edger_cov_all <- calcNormFactors(edger_cov_all)
+
+# Filtering 
+keep <- filterByExpr(edger_cov_all)
+edger_cov_all <- edger_cov_all[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_cov_all$samples$lib.size <- colSums(edger_cov_all$counts)
+
+# Vizualize library size
+barplot(edger_cov_all$samples$lib.size*1e-6, 
+        names= 1:153, 
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL")
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_cov_all <- calcNormFactors(edger_cov_all)
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_cov_all, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+# Get normalized gene counts for visualization and inspection of samples
+edger_cov_all_norm <- cpm(edger_cov_all, prior.count = 2, log = TRUE)
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+all_col <- c("red", "blue")[group]
+points <- c(1,2)[group]
+plotMDS(edger_cov_all, col = cd4_col, gene.selection = "common") # add pch = points if want symbols instead of sample names
+```
+
+```{r}
+# Get IFN genes from counts table
+all_cov_counts_ordered <- edger_cov_all_norm[c("MX1","OAS2","OAS3","IFI44L", "IFIT1", "IFIT2", "IFIT3", "ISG15", "ISG20", "MX2","IFITM1", "EPSTI1", "IFI44", "HERC5", "HERC6", "ADAR", "DDX60", "DDX60L", "HELZ2", "SPATS2L", 
+"RSAD2", "IFIH1", "ZCCHC2", "IFI6", "TRIM26", "USP18", "PARP9", "STAT2"), ]
+```
+
+```{r}
+# Match
+rownames(rna_cov_samples_ordered_roids) <- rna_cov_samples_ordered_roids$sample_id
+colnames(all_cov_counts_ordered) <- rna_cov_samples_ordered_roids$sample_id
+
+# Modify values for Ct > 40 (undetermined)
+rna_cov_samples_ordered_roids$Ct_N1 <- str_replace(rna_cov_samples_ordered_roids$Ct_N1, "Undetermined", "50")
+
+rna_cov_samples_ordered_roids$Ct_N1 <- as.numeric(rna_cov_samples_ordered_roids$Ct_N1)  
+
+# Scale values (SD of 1 and mean of 0 aka beautiful gaussian normal distribution)
+all_cov_counts_ordered <-  t(scale(t(all_cov_counts_ordered))) 
+
+# Annotation
+annotation_columns <- rna_cov_samples_ordered_roids %>% 
+  dplyr::select(Outcome,
+                'Infection status' = Infection_status,
+                 SOFA = mean_sofa,
+                 'Cumulative steroid dose' = hydrocort_equiv_since_adm,
+                 # 'Infection resolution status' = Episode_is_cured,
+                 CRP = C_Reactive_Protein,
+                 'D-Dimer' = D_DIMER,
+                  Ct = Ct_N1,
+                 finite_day_of_intubation) %>% 
+  arrange(finite_day_of_intubation) %>% 
+  dplyr::rename('Days from intubation' = finite_day_of_intubation) 
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha2 = HeatmapAnnotation(df = annotation_columns,
+                       col = list(
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         # 'Infection resolution status' =  c("Cured" = infection_pal[6],
+                         #        "Indeterminate" = infection_pal[5],
+                         #        "Not cured" = infection_pal[1]),
+                       'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                        Ct = colorRamp2(c(0,10,20,30,35,40,45,50), hcl_palette = "Blues2"),
+                         SOFA = colorRamp2(c(0,10,20), hcl_palette = "RdPu", reverse = TRUE),
+                         'Cumulative steroid dose' = colorRamp2(c(0,500,1000,2000,3000), hcl_palette = "Teal", reverse = TRUE),
+                         CRP = colorRamp2(c(0,5,10,20,30,40), hcl_palette = "YlOrBr", reverse = TRUE),
+                         'D-Dimer' = colorRamp2(c(0,1000,2500,5000,10000), hcl_palette = "BurgYl", reverse = TRUE),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       #show_legend = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE),
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         SOFA = list(
+                           title_gp = gpar(fontsize = 12,
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                         # 'Infection resolution status' = list(
+                         #   title_gp = gpar(fontsize = 12,
+                         #                   fontface = "bold"),
+                         #   labels_gp = gpar(fontsize = 11)),
+                           'Cumulative steroid dose' = list(
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"),
+                             labels_gp = gpar(fontsize = 11)),
+                          CRP = list(
+                           title_gp = gpar(fontsize = 12,
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Ct  = list(
+                               at = c(0,10,20,30,40),
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold")), 
+                           'D-Dimer' = list(
+                           title_gp = gpar(fontsize = 12,
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+
+# Plot
+set.seed(8271)
+all_rna_ifn <- Heatmap(mat = all_cov_counts_ordered[, rownames(annotation_columns)], 
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = FALSE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = TRUE,
+               top_annotation = ha2,
+               # row_km = 2,
+               # row_title = "",
+               column_title = NULL,
+               heatmap_legend_param = list(title = "Normalized expression",
+                                           at = c(-3,0,3), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+ 
+
+all_rna_ifn 
+
+all_rna_ifn   <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(all_rna_ifn, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 8, height = 8))
+
+all_rna_ifn 
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/all_rna_ifn.pdf", width=12, height=10)
+print(all_rna_ifn)
+dev.off()
+```
+
+
+
+
+
+
+

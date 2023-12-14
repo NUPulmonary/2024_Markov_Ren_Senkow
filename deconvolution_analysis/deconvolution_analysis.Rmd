@@ -1,0 +1,1010 @@
+---
+title: "Visualization of deconvolution analysis"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: use Karolina's cell-type deconvolution analysis to uncover potential association between alveolar T cell subsets and outcomes in severe pna
+---
+
+
+```{r}
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/") 
+
+library(dplyr)
+library(stringi)
+library(Cairo)
+library(ggsci)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(devtools)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(ggnewscale)
+library(patchwork)
+
+# Set seed
+set.seed(8271)
+
+# Palettes
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+antigen_pal2 = pal_d3("category20")(20)
+```
+
+
+
+```{r}
+## CD8 T cells
+# Plot by cell type proportion with Grant et al 2021 paper (MS1)
+# Load Karolina's data
+cd8_deconvo_ms1 <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/proportions_MS1_CD8.csv")
+
+# Matrix
+matrix_cd8_deconvo_ms1 <- cd8_deconvo_ms1 %>%  
+  remove_rownames() %>% 
+  column_to_rownames(var = "cell_types") 
+
+# Find filtered samples from edgeR analysis
+tcell_samples_cd8_deconvo <- tcell_samples_bulk_final_cd8 %>% 
+  filter(sample_id %in% colnames(edger_cd8_2))
+
+## Make sure samples match order between counts table and metadata
+# Remove samples filtered from edgeR analysis
+colnames(matrix_cd8_deconvo_ms1) %in%  tcell_samples_cd8_deconvo$sample_id
+cd8_deconvo_vec <- tcell_samples_cd8_deconvo$sample_id[tcell_samples_cd8_deconvo$sample_id %in% colnames(matrix_cd8_deconvo_ms1)]
+
+# Which order
+cd8_counts_ordered_deconvo_ms1 <- match(cd8_deconvo_vec, colnames(matrix_cd8_deconvo_ms1))
+
+# Apply to matrix
+cd8_counts_ordered_deconvo_ms1 <- matrix_cd8_deconvo_ms1[, cd8_counts_ordered_deconvo_ms1]
+
+# Order samples in metadata
+cd8_md_ordered_deconvo <- match(cd8_deconvo_vec, tcell_samples_cd8_deconvo$sample_id)
+cd8_samples_ordered_deconvo_ms1 <- tcell_samples_cd8_deconvo[cd8_md_ordered_deconvo, ]
+
+# Verify
+cd8_samples_ordered_deconvo_ms1$sample_id == colnames(cd8_counts_ordered_deconvo_ms1)
+
+# Verify again
+sum(cd8_samples_ordered_deconvo_ms1$sample_id != colnames(cd8_counts_ordered_deconvo_ms1))
+
+# Factor
+cd8_samples_ordered_deconvo_ms1$Diagnosis <- factor(cd8_samples_ordered_deconvo_ms1$pna_type_verified,
+                                        levels = c("Non-pneumonia control", "Other pneumonia",
+                                                   "COVID-19", "Other viral pneumonia"))
+cd8_samples_ordered_deconvo_ms1$Outcome <- factor(cd8_samples_ordered_deconvo_ms1$Outcome,
+                                      levels = c("Discharged", "Deceased"))
+
+cd8_samples_ordered_deconvo_ms1$Infection_status <- factor(cd8_samples_ordered_deconvo_ms1$Superinfection_verified,
+                                               levels = c("Primary Only", "Superinfection", "VAP"))
+
+# Add intubation timing and elder status
+cd8_samples_ordered_deconvo_ms1 <- cd8_samples_ordered_deconvo_ms1 %>% 
+  mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs"))
+
+cd8_samples_ordered_deconvo_ms1 <- cd8_samples_ordered_deconvo_ms1 %>%
+  dplyr::mutate(Elder_status = ifelse(age < 65, "≤ 65 years-old", "> 65 years-old"))
+
+# Add finite days and early samples flag
+cd8_samples_ordered_deconvo_ms1$finite_day_of_intubation = cd8_samples_ordered_deconvo_ms1$day_of_intubation
+cd8_samples_ordered_deconvo_ms1$finite_day_of_intubation[is.infinite(cd8_samples_ordered_deconvo_ms1$finite_day_of_intubation)] = NA
+
+# Fix rownames
+rownames(cd8_counts_ordered_deconvo_ms1) = c("CD8 cytotoxic T cells","CD8 cytotoxic TRM T cells", 
+                                         "CD8 prolif. T cells")
+
+# Metadata annotation
+annotation_col <- cd8_samples_ordered_deconvo_ms1 %>% 
+  dplyr::select(Diagnosis, Outcome, sample_id,
+                'Infection status' = Infection_status,
+                'Days from intubation' = finite_day_of_intubation) %>% 
+   remove_rownames() %>% 
+   column_to_rownames("sample_id") 
+
+# Color
+n_break = 20
+col_fun = circlize::colorRamp2(
+  seq(0, 1, length.out = n_break), 
+    viridis::magma(n_break))
+
+# Annotations for CH
+ha = HeatmapAnnotation(df = annotation_col,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12,
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+
+# Plot (Clustered)
+set.seed(8271)
+cd8_deconvo_ms1_plot <- Heatmap(mat = cd8_counts_ordered_deconvo_ms1,
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = TRUE,
+               cluster_columns = TRUE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = TRUE,
+               # column_split = 2,
+               # split = split,
+               row_gap = unit(1.5, "mm"),
+               column_gap = unit(1.5, "mm"),
+               top_annotation = ha,
+               column_title = "Treg cell samples",
+               row_title = "Differentially expressed genes (80)",
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(0,0.5,1), labels = c(0,0.5,1),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd8_deconvo_ms1_plot 
+
+cd8_deconvo_ms1_plot     <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd8_deconvo_ms1_plot , 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd8_deconvo_ms1_plot 
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/deconvo/cd8_deconvo_ms1_plot.pdf", width=14, height=8)
+print(cd8_deconvo_ms1_plot)
+dev.off()
+```
+
+```{r}
+# Plot (Unclustered)
+# Annotation
+annotation_col2 <- cd8_samples_ordered_deconvo_ms1  %>% 
+  dplyr::select(Diagnosis, sample_id,
+                Outcome,
+                'Infection status' = Infection_status,
+                 finite_day_of_intubation) %>% 
+  arrange(Diagnosis, finite_day_of_intubation) %>% 
+  dplyr::rename('Days from intubation' = finite_day_of_intubation) %>% 
+   remove_rownames() %>% 
+   column_to_rownames("sample_id") 
+
+# Color
+n_break = 20
+col_fun = circlize::colorRamp2(
+  seq(0, 1, length.out = n_break), 
+    viridis::magma(n_break))
+
+# Annotations for CH
+ha2 = HeatmapAnnotation(df = annotation_col2,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+# Column split
+column_split = rep("Non-pneumonia control", 125)
+column_split[16:30] = "Other pneumonia"
+column_split[31:102] = "COVID-19"
+column_split[103:125] = "Other viral pneumonia"
+cs <- as.data.frame(column_split)
+
+cs$column_split <- factor(cs$column_split, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot
+set.seed(8271)
+cd8_deconvo_ms1_unclust <- Heatmap(mat = cd8_counts_ordered_deconvo_ms1[, rownames(annotation_col2)], 
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = FALSE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = TRUE,
+               top_annotation = ha2,
+               column_split = cs$column_split,
+               column_title = NULL,
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(0,0.5,1), labels = c(0,0.5,1),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd8_deconvo_ms1_unclust 
+
+cd8_deconvo_ms1_unclust  <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd8_deconvo_ms1_unclust, 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd8_deconvo_ms1_unclust 
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/cd8_deconvo_ms1_unclust.pdf", width=14, height=8)
+print(cd8_deconvo_ms1_unclust)
+dev.off()
+```
+
+```{r}
+# Plot by cell types
+sample_cols <- colnames(cd8_counts_ordered_deconvo_ms1)[1:ncol(cd8_counts_ordered_deconvo_ms1)]
+cd8_deconvo_ms1_long <- as.data.frame(cd8_counts_ordered_deconvo_ms1) %>% 
+  rownames_to_column("cell_types")
+
+cd8_deconvo_ms1_long <- cd8_deconvo_ms1_long %>%
+  pivot_longer(cols = sample_cols,
+               names_to =  "sample_id",
+               values_to = "proportion")
+
+cd8_deconvo_ms1_long <- left_join(cd8_deconvo_ms1_long, cd8_samples_ordered_deconvo_ms1, by = "sample_id")
+
+cd8_deconvo_ms1_long <- cd8_deconvo_ms1_long[!is.na(cd8_deconvo_ms1_long$tc_pt_study_id), ]
+
+
+# Factor 
+cd8_deconvo_ms1_long$Diagnosis <- factor(cd8_deconvo_ms1_long$pna_type_verified,
+                                        levels = c("Non-pneumonia control", "Other pneumonia",
+                                                   "COVID-19", "Other viral pneumonia"))
+
+cd8_deconvo_ms1_long$Outcome <- factor(cd8_deconvo_ms1_long$Outcome,
+                                      levels = c("Discharged", "Deceased"))
+
+cd8_deconvo_ms1_long$Infection_status <- factor(cd8_deconvo_ms1_long$Superinfection_verified,
+                                               levels = c("Primary Only", "Superinfection", "VAP"))
+
+cd8_deconvo_ms1_long$dayETT <- factor(cd8_deconvo_ms1_long$dayETT, 
+                                     levels = c("≤ 48hrs", "> 48hrs"))
+
+cd8_deconvo_ms1_long$Elder_status<- factor(cd8_deconvo_ms1_long$Elder_status, 
+                                     levels = c("≤ 65 years-old", "> 65 years-old"))
+
+## CD8 T cells stats
+# Citotoxic
+                                         
+cd8_deconvo_ms1_long_cyto <- cd8_deconvo_ms1_long %>% 
+  dplyr::filter(cell_types == "CD8 cytotoxic T cells")
+
+cd8_deconvo_ms1_long_cyto_stats = pairwise.wilcox.test(cd8_deconvo_ms1_long_cyto$proportion,
+                                                  cd8_deconvo_ms1_long_cyto$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd8_deconvo_ms1_long_cyto_stats$group1 <- paste0(cd8_deconvo_ms1_long_cyto_stats$group1, "_cyto")
+
+
+# TRM
+cd8_deconvo_ms1_long_trm <- cd8_deconvo_ms1_long %>% 
+  dplyr::filter(cell_types == "CD8 cytotoxic TRM T cells")
+
+cd8_deconvo_ms1_long_trm_stats = pairwise.wilcox.test(cd8_deconvo_ms1_long_trm$proportion,
+                                                  cd8_deconvo_ms1_long_trm$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd8_deconvo_ms1_long_trm_stats$group1 <- paste0(cd8_deconvo_ms1_long_trm_stats$group1, "_trm")
+
+   
+# Proliferating
+cd8_deconvo_ms1_long_prof <- cd8_deconvo_ms1_long %>% 
+  dplyr::filter(cell_types == "CD8 prolif. T cells")
+
+cd8_deconvo_ms1_long_prof_stats = pairwise.wilcox.test(cd8_deconvo_ms1_long_prof$proportion,
+                                                  cd8_deconvo_ms1_long_prof$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd8_deconvo_ms1_long_prof_stats$group1 <- paste0(cd8_deconvo_ms1_long_prof_stats$group1, "_prof")
+
+# Bind rows and add adjusted p-val (cell types)
+all_stats_cd8_ms1 <- rbind(cd8_deconvo_ms1_long_cyto_stats, cd8_deconvo_ms1_long_prof_stats, cd8_deconvo_ms1_long_trm_stats)
+all_stats_cd8_ms1$p_adjusted <- p.adjust(all_stats_cd8_ms1$p.value, method = "fdr", n = length(all_stats_cd8_ms1$p.value))
+all_stats_cd8_ms1 <- all_stats_cd8_ms1 %>% 
+  dplyr::mutate(annot =  format(p_adjusted, digits = 3, scientific = T))
+
+# Annotations
+# 4.15e-02 cov - npc (prof)
+
+# Plot
+cd8_ms1_bpplot <- ggplot(cd8_deconvo_ms1_long, aes(y=proportion, x=cell_types)) +
+  geom_boxplot(aes(fill = Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_x_discrete(labels = c("Cytotoxic", "Cytotoxic TRM", "Proliferating")) +
+  labs(title=bquote(CD8^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Proportion of cell type")
+
+cd8_ms1_bpplot <- cd8_ms1_bpplot + geom_signif(y_position=c(0.75, 0.75),
+                xmin = c(2.7), xmax = c(3.1),
+                annotations = c("4.15e-02"),
+                tip_length = 0.0001,
+                textsize = 4.5) 
+  
+
+cd8_ms1_bpplot 
+  
+# Save PDF
+ggsave(cd8_ms1_bpplot, filename = "cd8_ms1_bpplot.pdf", dpi = 300, device = cairo_pdf,
+       width = 12, height = 7, units = "in")  
+
+```
+
+
+```{r}
+## Plot by timing of intubation and outcome
+# Look only at COVID pts
+cd8_ms1_cov <- cd8_deconvo_ms1_long %>% 
+  dplyr::filter(pna_type_verified == "COVID-19")
+
+# Factor
+cd8_ms1_cov$Outcome <- factor(cd8_ms1_cov$Outcome, 
+                                              levels = c("Discharged", "Deceased"))
+
+cd8_ms1_cov$dayETT <- factor(cd8_ms1_cov$dayETT, 
+                                              levels = c("≤ 48hrs", "> 48hrs"))
+
+cd8_ms1_cov_stats = cd8_ms1_cov %>%
+  mutate(combined = factor(paste(cell_types, dayETT, Outcome, sep = ",")))
+
+cd8_ms1_cov_stats = pairwise.wilcox.test(cd8_ms1_cov_stats$proportion,
+                                         cd8_ms1_cov_stats$combined,
+                                                p.adjust.method = "none",
+                                                exact = T) %>%
+  tidy() %>%
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>%
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("CD8 cytotoxic T cells", group1) ~ 1,
+                                 grepl("CD8 cytotoxic TRM T cells", group1) ~ 2,
+                                 grepl("CD8 prolif. T cells", group1) ~ 3),
+                xmax = case_when(grepl("CD8 cytotoxic T cells", group2) ~ 1,
+                                 grepl("CD8 cytotoxic TRM T cells", group2) ~ 2,
+                                 grepl("CD8 prolif. T cells", group2) ~ 3),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) &
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) &
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) &
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) &
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) &
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) &
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) &
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) &
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+cd8_ms1_cov_stats <- cd8_ms1_cov_stats[c(27,20,18,13,8,7,17,19), ]
+
+cd8_ms1_cov_stats <- cd8_ms1_cov_stats %>%
+  dplyr::mutate(yval = seq(from = 1.0, by = 0.08, length.out = nrow(.)))
+
+
+# Plot
+cd8_ms1_cov_outdayett <- ggplot(cd8_ms1_cov, aes(y=proportion, x=cell_types)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  geom_signif(inherit.aes = F,
+              data = cd8_ms1_cov_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+    scale_y_continuous(expand = expansion(add = 0.1), breaks = seq(0, 1, by = 0.25)) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_x_discrete(labels = c("Cytotoxic", "Cytotoxic TRM", "Proliferating")) +
+  labs(title=bquote(CD8^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Proportion of cell type")
+
+cd8_ms1_cov_outdayett
+
+# Save
+ggsave(cd8_ms1_cov_outdayett, filename = "cd8_ms1_cov_outdayett.pdf", dpi = 300, device = cairo_pdf,width = 12, height = 7, units = "in")  
+```
+
+
+```{r}
+# CD4 T cells
+# Plot by cell type proportion with Grant et al 2021 (MS1)
+# Upload Karolina's data
+cd4_deconvo_ms1 <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/proportions_MS1_CD4_treg.csv")
+
+# Matrix
+matrix_cd4_deconvo_ms1 <- cd4_deconvo_ms1 %>%  
+  remove_rownames() %>% 
+  column_to_rownames(var = "cell_types") 
+
+# Find filtered samples from edgeR analysis
+tcell_samples_cd4_deconvo <- tcell_samples_bulk_final_cd4 %>% 
+  filter(sample_id %in% colnames(edger_cd4_2))
+
+# Get Treg samples
+# Find filtered samples from edgeR analysis
+tcell_samples_treg_deconvo <- tcell_samples_bulk_final_treg %>% 
+  filter(sample_id %in% colnames(edger_tregs3))
+
+# Merge both tables
+tcell_samples_cd4_deconvo <- bind_rows(tcell_samples_cd4_deconvo, tcell_samples_treg_deconvo)
+
+## Make sure samples match order between counts table and metadata
+# Remove samples filtered from edgeR analysis
+colnames(matrix_cd4_deconvo_ms1) %in%  tcell_samples_cd4_deconvo$sample_id
+cd4_deconvo_vec <- tcell_samples_cd4_deconvo$sample_id[tcell_samples_cd4_deconvo$sample_id %in% colnames(matrix_cd4_deconvo_ms1)]
+
+# Which order
+cd4_counts_ordered_deconvo_ms1 <- match(cd4_deconvo_vec, colnames(matrix_cd4_deconvo_ms1))
+
+# Apply to matrix
+cd4_counts_ordered_deconvo_ms1 <- matrix_cd4_deconvo_ms1[, cd4_counts_ordered_deconvo_ms1]
+
+# Order samples in metadata
+cd4_md_ordered_deconvo <- match(cd4_deconvo_vec, tcell_samples_cd4_deconvo$sample_id)
+cd4_samples_ordered_deconvo_ms1 <- tcell_samples_cd4_deconvo[cd4_md_ordered_deconvo, ]
+
+# Verify
+cd4_samples_ordered_deconvo_ms1$sample_id == colnames(cd4_counts_ordered_deconvo_ms1)
+
+# Verify again
+sum(cd4_samples_ordered_deconvo_ms1$sample_id != colnames(cd4_counts_ordered_deconvo_ms1))
+
+# Factor
+cd4_samples_ordered_deconvo_ms1$Diagnosis <- factor(cd4_samples_ordered_deconvo_ms1$pna_type_verified,
+                                        levels = c("Non-pneumonia control", "Other pneumonia",
+                                                   "COVID-19", "Other viral pneumonia"))
+
+cd4_samples_ordered_deconvo_ms1$Outcome <- factor(cd4_samples_ordered_deconvo_ms1$Outcome,
+                                      levels = c("Discharged", "Deceased"))
+
+cd4_samples_ordered_deconvo_ms1$Infection_status <- factor(cd4_samples_ordered_deconvo_ms1$Superinfection_verified,
+                                               levels = c("Primary Only", "Superinfection", "VAP"))
+
+# Add intubation timing and elder status
+cd4_samples_ordered_deconvo_ms1 <- cd4_samples_ordered_deconvo_ms1 %>% 
+  mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs"))
+
+cd4_samples_ordered_deconvo_ms1 <- cd4_samples_ordered_deconvo_ms1 %>%
+  dplyr::mutate(Elder_status = ifelse(age < 65, "≤ 65 years-old", "> 65 years-old"))
+
+# Add finite days and early samples flag
+cd4_samples_ordered_deconvo_ms1$finite_day_of_intubation = cd4_samples_ordered_deconvo_ms1$day_of_intubation
+cd4_samples_ordered_deconvo_ms1$finite_day_of_intubation[is.infinite(cd4_samples_ordered_deconvo_ms1$finite_day_of_intubation)] = NA
+
+# Fix rownames
+rownames(cd4_counts_ordered_deconvo_ms1) = c("CD4 CM T cells","CD4 cytotoxic T cells", 
+                                         "CD4 prolif. T cells", "Treg")
+
+# Metadata annotation
+annotation_col <- cd4_samples_ordered_deconvo_ms1 %>% 
+  dplyr::select(Diagnosis, Outcome, sample_id,
+                'Infection status' = Infection_status,
+                'Days from intubation' = finite_day_of_intubation) %>% 
+   remove_rownames() %>% 
+   column_to_rownames("sample_id") 
+
+# Color
+n_break = 20
+col_fun = circlize::colorRamp2(
+  seq(0, 1, length.out = n_break), 
+    viridis::magma(n_break))
+
+# Annotations for CH
+ha = HeatmapAnnotation(df = annotation_col,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12,
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+
+# Plot (Clustered)
+set.seed(8271)
+cd4_deconvo_ms1_plot <- Heatmap(mat = cd4_counts_ordered_deconvo_ms1,
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = TRUE,
+               cluster_columns = TRUE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = TRUE,
+               # column_split = 2,
+               # split = split,
+               row_gap = unit(1.5, "mm"),
+               column_gap = unit(1.5, "mm"),
+               top_annotation = ha,
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(0,0.5,1), labels = c(0,0.5,1),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd4_deconvo_ms1_plot
+
+cd4_deconvo_ms1_plot <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd4_deconvo_ms1_plot, 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd4_deconvo_ms1_plot
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/cd4_deconvo_ms1_plot.pdf", width=14, height=8)
+print(cd4_deconvo_ms1_plot)
+dev.off()
+```
+```{r}
+# Plot (Unclustered)
+# Annotation
+annotation_col2 <- cd4_samples_ordered_deconvo_ms1  %>% 
+  dplyr::select(Diagnosis, sample_id,
+                Outcome,
+                'Infection status' = Infection_status,
+                 finite_day_of_intubation) %>% 
+  arrange(Diagnosis, finite_day_of_intubation) %>% 
+  dplyr::rename('Days from intubation' = finite_day_of_intubation) %>% 
+   remove_rownames() %>% 
+   column_to_rownames("sample_id") 
+
+# Color
+n_break = 20
+col_fun = circlize::colorRamp2(
+  seq(0, 1, length.out = n_break), 
+    viridis::magma(n_break))
+
+# Annotations for CH
+ha2 = HeatmapAnnotation(df = annotation_col2,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+# Column split
+column_split = rep("Non-pneumonia control", 211)
+column_split[24:59] = "Other pneumonia"
+column_split[60:187] = "COVID-19"
+column_split[188:211] = "Other viral pneumonia"
+cs <- as.data.frame(column_split)
+
+cs$column_split <- factor(cs$column_split, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot
+set.seed(8271)
+cd4_deconvo_ms1_unclust <- Heatmap(mat = cd4_counts_ordered_deconvo_ms1[, rownames(annotation_col2)], 
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = FALSE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = TRUE,
+               top_annotation = ha2,
+               column_split = cs$column_split,
+               column_title = NULL,
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(0,0.5,1), labels = c(0,0.5,1),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd4_deconvo_ms1_unclust 
+
+cd4_deconvo_ms1_unclust <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd4_deconvo_ms1_unclust , 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd4_deconvo_ms1_unclust 
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/deconvo/cd4_deconvo_ms1_unclust.pdf", width=14, height=8)
+print(cd4_deconvo_ms1_unclust)
+dev.off()
+```
+
+```{r}
+# Plot by cell type
+sample_cols <- colnames(cd4_counts_ordered_deconvo_ms1)[1:ncol(cd4_counts_ordered_deconvo_ms1)]
+cd4_deconvo_ms1_long <- as.data.frame(cd4_counts_ordered_deconvo_ms1) %>% 
+  rownames_to_column("cell_types")
+
+cd4_deconvo_ms1_long <- cd4_deconvo_ms1_long %>%
+  pivot_longer(cols = sample_cols,
+               names_to =  "sample_id",
+               values_to = "proportion")
+
+cd4_deconvo_ms1_long <- left_join(cd4_deconvo_ms1_long, cd4_samples_ordered_deconvo_ms1, by = "sample_id")
+
+cd4_deconvo_ms1_long <- cd4_deconvo_ms1_long[!is.na(cd4_deconvo_ms1_long$tc_pt_study_id), ]
+
+
+# Factor 
+cd4_deconvo_ms1_long$Diagnosis <- factor(cd4_deconvo_ms1_long$pna_type_verified,
+                                        levels = c("Non-pneumonia control", "Other pneumonia",
+                                                   "COVID-19", "Other viral pneumonia"))
+
+cd4_deconvo_ms1_long$Outcome <- factor(cd4_deconvo_ms1_long$Outcome,
+                                      levels = c("Discharged", "Deceased"))
+
+cd4_deconvo_ms1_long$Infection_status <- factor(cd4_deconvo_ms1_long$Superinfection_verified,
+                                               levels = c("Primary Only", "Superinfection", "VAP"))
+
+cd4_deconvo_ms1_long$dayETT <- factor(cd4_deconvo_ms1_long$dayETT, 
+                                     levels = c("≤ 48hrs", "> 48hrs"))
+
+cd4_deconvo_ms1_long$Elder_status<- factor(cd4_deconvo_ms1_long$Elder_status, 
+                                     levels = c("≤ 65 years-old", "> 65 years-old"))
+
+## CD4 T cells stats
+# TCM
+cd4_deconvo_ms1_long_tcm <- cd4_deconvo_ms1_long %>% 
+  dplyr::filter(cell_types == "CD4 CM T cells")
+
+cd4_deconvo_ms1_long_tcm_stats = pairwise.wilcox.test(cd4_deconvo_ms1_long_tcm$proportion,
+                                                  cd4_deconvo_ms1_long_tcm$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd4_deconvo_ms1_long_tcm_stats$group1 <- paste0(cd4_deconvo_ms1_long_tcm_stats$group1, "_tcm")
+
+
+# Cytotoxic
+cd4_deconvo_ms1_long_cyto <- cd4_deconvo_ms1_long %>% 
+  dplyr::filter(cell_types == "CD4 cytotoxic T cells")
+
+cd4_deconvo_ms1_long_cyto_stats = pairwise.wilcox.test(cd4_deconvo_ms1_long_cyto$proportion,
+                                                  cd4_deconvo_ms1_long_cyto$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd4_deconvo_ms1_long_cyto_stats$group1 <- paste0(cd4_deconvo_ms1_long_cyto_stats$group1, "_cyto")
+
+   
+# Proliferating
+cd4_deconvo_ms1_long_prof <- cd4_deconvo_ms1_long %>% 
+  dplyr::filter(cell_types == "CD4 prolif. T cells")
+
+cd4_deconvo_ms1_long_prof_stats = pairwise.wilcox.test(cd4_deconvo_ms1_long_prof$proportion,
+                                                  cd4_deconvo_ms1_long_prof$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd4_deconvo_ms1_long_prof_stats$group1 <- paste0(cd4_deconvo_ms1_long_prof_stats$group1, "_prof")
+
+
+# Treg
+cd4_deconvo_ms1_long_treg <- cd4_deconvo_nyc_long %>% 
+  dplyr::filter(cell_types == "Treg")
+
+cd4_deconvo_ms1_long_treg_stats = pairwise.wilcox.test(cd4_deconvo_ms1_long_treg$proportion,
+                                                  cd4_deconvo_ms1_long_treg$Diagnosis, 
+                                             p.adjust.method = "none",
+                                             exact = T) %>% 
+  tidy()
+
+cd4_deconvo_ms1_long_treg_stats$group1 <- paste0(cd4_deconvo_ms1_long_treg_stats$group1, "_treg")
+
+
+
+# Bind rows and add adjusted p-val (cell types)
+all_stats_cd4_ms1 <- rbind(cd4_deconvo_ms1_long_tcm_stats, cd4_deconvo_ms1_long_cyto_stats, cd4_deconvo_ms1_long_prof_stats, cd4_deconvo_ms1_long_treg_stats)
+all_stats_cd4_ms1$p_adjusted <- p.adjust(all_stats_cd4_ms1$p.value, method = "fdr", n = length(all_stats_cd4_ms1$p.value))
+all_stats_cd4_ms1 <- all_stats_cd4_ms1 %>% 
+  dplyr::mutate(annot =  format(p_adjusted, digits = 3, scientific = T))
+
+# Annotations
+# None significant
+
+# Plot
+cd4_ms1_bpplot <- ggplot(cd4_deconvo_ms1_long, aes(y=proportion, x=cell_types)) +
+  geom_boxplot(aes(fill = Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_x_discrete(labels = c("Central\nMemory", "Cytotoxic", "Proliferating", "Treg")) +
+  labs(title=bquote(CD4^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Proportion of cell type")
+
+cd4_ms1_bpplot 
+
+# Save PDF
+ggsave(cd4_ms1_bpplot, filename = "cd4_ms1_bpplot.pdf", dpi = 300, device = cairo_pdf,
+       width = 12, height = 7, units = "in") 
+```
+
+
+```{r}
+## Plot by timing relative to intubation and outcome
+# Look only at COVID pts
+cd4_ms1_cov <- cd4_deconvo_ms1_long %>% 
+  dplyr::filter(pna_type_verified == "COVID-19")
+
+# Factor
+cd4_ms1_cov$Outcome <- factor(cd4_ms1_cov$Outcome, 
+                                              levels = c("Discharged", "Deceased"))
+
+cd4_ms1_cov$dayETT <- factor(cd4_ms1_cov$dayETT, 
+                                              levels = c("≤ 48hrs", "> 48hrs"))
+
+# Stats
+cd4_ms1_cov_stats = cd4_ms1_cov %>%
+  mutate(combined = factor(paste(cell_types, dayETT, Outcome, sep = ",")))
+
+cd4_ms1_cov_stats = pairwise.wilcox.test(cd4_ms1_cov_stats$proportion,
+                                         cd4_ms1_cov_stats$combined,
+                                                p.adjust.method = "none",
+                                                exact = T) %>%
+  tidy() %>%
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>%
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("CD4 CM T cells", group1) ~ 1,
+                                 grepl("CD4 cytotoxic T cells", group1) ~ 2,
+                                 grepl("CD4 prolif. T cells", group1) ~ 3,
+                                 grepl("Treg", group1) ~ 4),
+                xmax = case_when(grepl("CD4 CM T cells", group2) ~ 1,
+                                 grepl("CD4 cytotoxic T cells", group2) ~ 2,
+                                 grepl("CD4 prolif. T cells", group2) ~ 3,
+                                 grepl("Treg", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) &
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) &
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) &
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) &
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) &
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) &
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) &
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) &
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+cd4_ms1_cov_stats <- cd4_ms1_cov_stats[c(45,36,40,33,32,39,35,44,27,7,8,13,26,19,17,34), ]
+
+cd4_ms1_cov_stats <- cd4_ms1_cov_stats %>%
+  dplyr::mutate(yval = seq(from = 1.0, by = 0.1, length.out = nrow(.)))
+
+
+# Plot
+cd4_ms1_cov_outdayett <- ggplot(cd4_ms1_cov, aes(y=proportion, x=cell_types)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  geom_signif(inherit.aes = F,
+              data = cd4_ms1_cov_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+    scale_y_continuous(expand = expansion(add = 0.1), breaks = seq(0, 1, by = 0.25)) +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_x_discrete(labels = c("Central Memory", "Cytotoxic", "Proliferating", "Treg")) +
+  labs(title=bquote(CD4^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Proportion of cell type")
+
+cd4_ms1_cov_outdayett
+
+# Save
+ggsave(cd4_ms1_cov_outdayett, filename = "cd4_ms1_cov_outdayett.pdf", dpi = 300, device = cairo_pdf,width = 12, height = 7, units = "in")  
+```
+
+
+
+

@@ -1,0 +1,1215 @@
+---
+title: "Bulk TCR-seq analysis of alveolar T cell subsets"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goals: 
+	- Processing of raw sequencing files from bulk TCR-seq runs
+  	- Richness estimation across distinct pna etiologies
+---
+
+
+```{r}
+
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/") 
+
+
+library(tidyverse)
+library(broom)
+library(immunarch) 
+library(stringi)
+library(gridExtra)
+library(ggsci)
+library(ggplot2)
+library(RColorBrewer)
+library(ggsignif)
+library(janitor)
+library(ggpubr)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(gridtext)
+
+# Set seed
+set.seed(8271)
+
+# PNA palette
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+antigen_pal2 = pal_d3("category20")(20)
+```
+
+```{r}
+# Load SCRIPT metadata
+script_metadata.2 <- readRDS("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/2022-04-25_SCRIPT_cytokines_metadata.rds") # Upload updated metadata from Rogan
+dx_verification_3 <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/dx_verification_3.xlsx") # Upload verified dx and superinfection status from Ben
+
+dx <- dx_verification_3 %>% 
+  dplyr::select(Sample_ID, pna_type_verified, Superinfection_verified) %>% 
+  dplyr::rename(tc_pt_study_id = Sample_ID)
+
+script_metadata.2 <- left_join(script_metadata.2, dx, by = "tc_pt_study_id")
+
+## Load T cell samples WITH corrected metadata
+tcell_ms_allsamples_tcr <- read_xlsx("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/tcell_ms_allsamples_with_extra_tcr_samples.xlsx")
+```
+
+```{bash eval=FALSE}
+## MiXCR Pilot
+
+#!/bin/bash
+#SBATCH -A bXXXX
+#SBATCH -p genomics
+#SBATCH -t 12:00:00
+#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
+#SBATCH --mail-user=luisamorales@northwestern.edu
+#SBATCH --output=analysis.log
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH --mem-per-cpu=800M
+#SBATCH --export=NONE
+#SBATCH -J-TCR_pilot
+
+# add a project directory to your PATH (if needed)
+export PATH=$PATH:/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/tools/mixcr-3.0.13
+
+# load modules
+#module load mixcr
+
+# set working directory
+cd /projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/210709_MN00995_0034_A000H3GVCL/Alignment_1/20210710_093629/Fastq
+
+# For samples
+for x in {1..9} ; do
+ mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        TCR-00${x}_S${x}_L001_R1_001.fastq.gz TCR-00${x}_S${x}_L001_R2_001.fastq.gz TCR_$x ; 
+ done
+ 
+# For undetermined (separate)
+  mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        Undetermined_S0_L001_R1_001.fastq.gz Undetermined_S0_L001_R2_001.fastq.gz Undetermined_S0 ; 
+        
+ done
+```
+
+
+```{r}
+## Load pilot experiment 
+# Upload metadata.txt table
+metadata.pilot.txt <- read.table("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20210709_TCR_pilot/210709_MN00995_0034_A000H3GVCL/Alignment_1/20210710_093629/Fastq/clonotype_ALL/metadata.pilot.txt", sep = "\t", header = T)
+
+# Select samples number 4 and number 8 for downstream analysis (500ug)
+metadata.pilot.txt <- metadata.pilot.txt %>% 
+  dplyr::select(Sample, tc_pt_study_id, cell.type, pna_category, tubeid) %>% 
+  dplyr::filter(Sample %in% c("TCR4.clonotypes.ALL", "TCR8.clonotypes.ALL"))
+
+# Combined pilot's metadata with corrected SCRIPT metadata
+mixed_metadata_pilot <- left_join(metadata.pilot.txt, script_metadata.2, by = "tc_pt_study_id")
+
+# Replace with the path to folder with  processed MiXCR data. 
+file_path = "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20210709_TCR_pilot/210709_MN00995_0034_A000H3GVCL/Alignment_1/20210710_093629/Fastq/clonotype_ALL/"
+
+#Load MiXCR data with repLoad
+immdata_mixcr_pilot <- repLoad(file_path)  
+
+# Pipe metadata into immdata
+immdata_mixcr_pilot$meta <- mixed_metadata_pilot 
+```
+
+```{bash eval=FALSE}
+#!/bin/bash
+#SBATCH -A bXXXX
+#SBATCH -p genomics
+#SBATCH -t 12:00:00
+#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
+#SBATCH --mail-user=luisamorales@northwestern.edu
+#SBATCH --output=analysis.log
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH --mem-per-cpu=800M
+#SBATCH --export=NONE
+#SBATCH -J-TCR_batch1
+
+# add a project directory to your PATH (if needed)
+export PATH=$PATH:/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/tools/mixcr-3.0.13
+
+# load modules
+#module load mixcr
+
+# set working directory
+cd /projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20211109_TCR_batch1/211109_NB501488_0480_AHCYTYAFX3/Alignment_1/20211110_171854/Fastq
+
+
+for x in {1..44} ; do
+ printf -v j "%02d" $x
+ 
+ cat TCR-01${j}_S${x}_L001_R1_001.fastq.gz \
+	 TCR-01${j}_S${x}_L002_R1_001.fastq.gz \
+	 TCR-01${j}_S${x}_L003_R1_001.fastq.gz \
+	 TCR-01${j}_S${x}_L004_R1_001.fastq.gz \
+	 > TCR-01${j}_S${x}_F1.fastq.gz
+ 
+ cat TCR-01${j}_S${x}_L001_R2_001.fastq.gz \
+	 TCR-01${j}_S${x}_L002_R2_001.fastq.gz \
+	 TCR-01${j}_S${x}_L003_R2_001.fastq.gz \
+	 TCR-01${j}_S${x}_L004_R2_001.fastq.gz \
+	 > TCR-01${j}_S${x}_F2.fastq.gz
+	 
+ mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        TCR-01${j}_S${x}_F1.fastq.gz TCR-01${j}_S${x}_F2.fastq.gz TCR_$x ; 
+ done
+ 
+# For undetermined (separate)
+cat Undetermined_S0_L001_R1_001.fastq.gz \
+	 Undetermined_S0_L002_R1_001.fastq.gz \
+	 Undetermined_S0_L003_R1_001.fastq.gz \
+	 Undetermined_S0_L004_R1_001.fastq.gz \
+	 > Undetermined_S0_F1.fastq.gz
+ 
+ cat Undetermined_S0_L001_R2_001.fastq.gz \
+	 Undetermined_S0_L002_R2_001.fastq.gz \
+	 Undetermined_S0_L003_R2_001.fastq.gz \
+	 Undetermined_S0_L004_R2_001.fastq.gz \
+	 > Undetermined_S0_F2.fastq.gz
+	 
+ mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        Undetermined_S0_F1.fastq.gz Undetermined_S0_F2.fastq.gz Undetermined_S0 ; 
+  
+ done
+```
+
+```{r}
+## TCR batch 1 
+# Upload metadata.txt table
+metadata.txt <- read.table("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20211109_TCR_batch1/211109_NB501488_0480_AHCYTYAFX3/Alignment_1/20211110_171854/Fastq/clonotypes.ALL/metadata.txt", sep = "\t", header = T)
+
+# Combined metadata.txt with corrected and SCRIPT metadata
+mixed_metadata <- left_join(metadata.txt, script_metadata.2, by = "tc_pt_study_id")
+
+#Replace with the path to the folder with your processed MiXCR data
+file_path = "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20211109_TCR_batch1/211109_NB501488_0480_AHCYTYAFX3/Alignment_1/20211110_171854/Fastq/clonotypes.ALL/"
+
+#Load MiXCR data with repLoad
+immdata_mixcr <- repLoad(file_path) 
+
+# Pipe into dataset
+immdata_mixcr$meta <- mixed_metadata 
+```
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH -A bXXXX
+#SBATCH -p genomics
+#SBATCH -t 12:00:00
+#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
+#SBATCH --mail-user=luisamorales@northwestern.edu
+#SBATCH --output=analysis.log
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH --mem-per-cpu=800M
+#SBATCH --export=NONE
+#SBATCH -J-TCR_batch2
+
+# add a project directory to your PATH (if needed)
+export PATH=$PATH:/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/tools/mixcr-3.0.13
+
+# load modules
+#module load mixcr
+
+# set working directory
+cd /projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20211221_TCR_batch2/211217_NB501488_0485_AHCWNTAFX3/Alignment_1/20211218_180152/Fastq
+
+
+for x in {0146..0192} ; do
+
+ cat TCR-${x}_S*_L001_R1_001.fastq.gz \
+	 TCR-${x}_S*_L002_R1_001.fastq.gz \
+	 TCR-${x}_S*_L003_R1_001.fastq.gz \
+	 TCR-${x}_S*_L004_R1_001.fastq.gz \
+	 > TCR-${x}_F1.fastq.gz
+
+ cat TCR-${x}_S*_L001_R2_001.fastq.gz \
+	 TCR-${x}_S*_L002_R2_001.fastq.gz \
+	 TCR-${x}_S*_L003_R2_001.fastq.gz \
+	 TCR-${x}_S*_L004_R2_001.fastq.gz \
+	 > TCR-${x}_F2.fastq.gz
+
+ mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        TCR-${x}_F1.fastq.gz TCR-${x}_F2.fastq.gz TCR_$x ;
+ done
+```
+
+```{r}
+## TCR batch 2
+# Upload metadata2.txt table
+metadata2.txt <- read.table("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20211221_TCR_batch2/211217_NB501488_0485_AHCWNTAFX3/Alignment_1/20211218_180152/Fastq/clonotypes_ALL/metadata2.txt", sep = "\t", header = T)
+
+# Combined metadata2.txt with corrected and SCRIPT metadata
+mixed_metadata2 <- left_join(metadata2.txt, script_metadata.2, by = "tc_pt_study_id")
+
+# Replace with the path to the folder with your processed MiXCR data
+file_path = "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20211221_TCR_batch2/211217_NB501488_0485_AHCWNTAFX3/Alignment_1/20211218_180152/Fastq/clonotypes_ALL/"                         
+
+# Load MiXCR data with repLoad
+immdata_mixcr2 <- repLoad(file_path) 
+
+# Pipe into Mixcr dataset
+immdata_mixcr2$meta <- mixed_metadata2 
+```
+
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH -A bXXXX
+#SBATCH -p genomics
+#SBATCH -t 12:00:00
+#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
+#SBATCH --mail-user=luisamorales@northwestern.edu
+#SBATCH --output=analysis.log
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH --mem-per-cpu=800M
+#SBATCH --export=NONE
+#SBATCH -J-TCR_batch2
+
+# add a project directory to your PATH (if needed)
+export PATH=$PATH:/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/tools/mixcr-3.0.13
+
+# load modules
+#module load mixcr
+
+# set working directory
+cd /projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20220314_TCR_batch3/220310_NB501488_0498_AHJN2NAFX3/Alignment_1/20220314_094011/Fastq
+
+
+for x in {91..135} ; do
+
+ cat TCRseq-${x}_S*_L001_R1_001.fastq.gz \
+	 TCRseq-${x}_S*_L002_R1_001.fastq.gz \
+	 TCRseq-${x}_S*_L003_R1_001.fastq.gz \
+	 TCRseq-${x}_S*_L004_R1_001.fastq.gz \
+	 > TCRseq-${x}_F1.fastq.gz
+
+ cat TCRseq-${x}_S*_L001_R2_001.fastq.gz \
+	 TCRseq-${x}_S*_L002_R2_001.fastq.gz \
+	 TCRseq-${x}_S*_L003_R2_001.fastq.gz \
+	 TCRseq-${x}_S*_L004_R2_001.fastq.gz \
+	 > TCRseq-${x}_F2.fastq.gz
+
+ mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        TCRseq-${x}_F1.fastq.gz TCRseq-${x}_F2.fastq.gz TCRseq_$x ;
+ done
+ 
+
+# For undetermined (separate)
+ cat 03102022urna500pcg_S45_L001_R1_001.fastq.gz \
+	 03102022urna500pcg_S45_L002_R1_001.fastq.gz \
+	 03102022urna500pcg_S45_L003_R1_001.fastq.gz \
+	 03102022urna500pcg_S45_L004_R1_001.fastq.gz \
+	 > 03102022urna500pcg_S45_F1.fastq.gz
+
+ cat 03102022urna500pcg_S45_L001_R2_001.fastq.gz \
+	 03102022urna500pcg_S45_L002_R2_001.fastq.gz \
+	 03102022urna500pcg_S45_L003_R2_001.fastq.gz \
+	 03102022urna500pcg_S45_L004_R2_001.fastq.gz \
+	 > 03102022urna500pcg_S45_F2.fastq.gz
+
+ mixcr analyze amplicon --species hs \
+        --starting-material rna \
+        --5-end v-primers \
+        --3-end j-primers \
+        --adapters adapters-present \
+        03102022urna500pcg_S45_F1.fastq.gz 03102022urna500pcg_S45_F2.fastq.gz 03102022urna500pcg_S45 ;
+ done
+```
+
+```{r}
+## TCR batch 3
+# Upload metadata2.txt table
+metadata3.txt <- read.table("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20220314_TCR_batch3/220310_NB501488_0498_AHJN2NAFX3/Alignment_1/20220314_094011/Fastq/ALL_clonotypes/metadata3.txt", sep = "\t", header = T)
+
+# Combined metadata3.txt with corrected and SCRIPT metadata
+mixed_metadata3 <- left_join(metadata3.txt, script_metadata.2, by = "tc_pt_study_id")
+
+# Replace with the path to the folder with your processed MiXCR data
+file_path = "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/20220314_TCR_batch3/220310_NB501488_0498_AHJN2NAFX3/Alignment_1/20220314_094011/Fastq/ALL_clonotypes/"                         
+# Load MiXCR data with repLoad
+immdata_mixcr3 <- repLoad(file_path)
+
+# Pipe into Mixcr dataset
+immdata_mixcr3$meta <- mixed_metadata3
+
+```
+
+```{r}
+# Combine all metadata from TCR samples
+all_mixed_metadata <- full_join(mixed_metadata, mixed_metadata2)
+all_mixed_metadata <- full_join(all_mixed_metadata, mixed_metadata_pilot)
+all_mixed_metadata <- full_join(all_mixed_metadata, mixed_metadata3)
+
+# Add variables of interest
+all_mixed_metadata <- all_mixed_metadata %>% 
+  dplyr::mutate(Outcome = case_when(stri_detect_fixed(binned_outcome, "Deceased") ~ "Deceased",
+                           stri_detect_fixed(binned_outcome, "Home") ~ "Discharged",
+                           stri_detect_fixed(binned_outcome, "Inpatient Facility") ~ "Discharged",
+                           stri_detect_fixed(binned_outcome, "LTAC") ~ "Discharged",
+                                 TRUE  ~ "Default")) %>% 
+  dplyr::mutate(cov_status = case_when(stri_detect_fixed(pna_type_verified, "COVID-19") ~ "COVID-19",
+                                       stri_detect_fixed(pna_type_verified, "Non-pneumonia control") ~ "Non-COVID-19",
+                                       stri_detect_fixed(pna_type_verified, "Other pneumonia") ~ "Non-COVID-19",
+                                       stri_detect_fixed(pna_type_verified, "Other viral pneumonia") ~ "Non-COVID-19",
+                                       TRUE  ~ "Default")) %>% 
+  dplyr::mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs"),
+                Elder_status = ifelse(age <= 65, "≤ 65 years-old", "> 65 years-old")) %>% 
+  dplyr::mutate(bal_timing = ifelse(day_of_intubation <= 2, "Early", "Late"))
+
+
+# Add finite days
+all_mixed_metadata$finite_day_of_intubation = all_mixed_metadata$day_of_intubation
+all_mixed_metadata$finite_day_of_intubation[is.infinite(all_mixed_metadata$finite_day_of_intubation)] = NA
+```
+
+```{r}
+# Generate anonymized file for supplement
+tcr_metadata <- all_mixed_metadata %>% 
+  dplyr::select(Sample, tc_pt_study_id, study_id, Cell = cell.type, Diagnosis = pna_type_verified)
+
+tcr_metadata_key <- inner_join(tcr_metadata, allu_rna_id_anonym , by = "study_id") %>% 
+  dplyr::select(-study_id)
+  
+# Add anonymized pt/sample id
+tcr_metadata_key <- tcr_metadata_key %>% 
+  dplyr::mutate(anonym_pt_study_id = gsub("^[^-]+", "", tcr_metadata_key$tc_pt_study_id))
+  
+tcr_metadata_key$Anonymized_pt_study_id <- paste(tcr_metadata_key$Anonymized_id, tcr_metadata_key$anonym_pt_study_id)
+
+tcr_metadata_key <- tcr_metadata_key %>% 
+  dplyr::select(Sample, Anonymized_id, Anonymized_pt_study_id, Cell, Diagnosis)
+
+# Save
+write.csv(tcr_metadata_key, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/tcr_metadata_keyl.csv")
+```
+
+```{r}
+# Combine all mixcr data
+all_mixed_data <- c(immdata_mixcr_pilot$data, immdata_mixcr$data, immdata_mixcr2$data, immdata_mixcr3$data)
+
+# Find missing data (discrepancy of 7 samples due to 6 extra samples from pilot plus 1 control from pilot)
+names(all_mixed_data) %in% all_mixed_metadata$Sample
+
+# Find all samples in data table within meta table
+all_mixed_data <- all_mixed_data[names(all_mixed_data) %in% all_mixed_metadata$Sample]
+
+# Create table with CD4 sample metadata
+cd4_mixed_metadata <- all_mixed_metadata %>% 
+  filter(cell.type == "CD4") 
+
+# Create CD4 mixcr object
+cd4_mixed_data <- c(immdata_mixcr$data, immdata_mixcr2$data, immdata_mixcr3$data) #combine data
+names(cd4_mixed_data) %in% cd4_mixed_metadata$Sample
+cd4_mixed_data <- cd4_mixed_data[names(cd4_mixed_data) %in% cd4_mixed_metadata$Sample] #Find cd4 samples within data list that match metadata table
+cd4_immdata_mixcr <- list(data = cd4_mixed_data, meta = cd4_mixed_metadata) #combined object
+
+
+# Create table with CD8 samples
+cd8_mixed_metadata <- all_mixed_metadata %>% 
+  filter(cell.type == "CD8") # select metadata from CD8 samples
+
+cd8_mixed_data <- c(immdata_mixcr_pilot$data, immdata_mixcr$data, immdata_mixcr2$data, immdata_mixcr3$data) #combine data
+names(cd8_mixed_data) %in% cd8_mixed_metadata$Sample
+cd8_mixed_data <- cd8_mixed_data[names(cd8_mixed_data) %in% cd8_mixed_metadata$Sample] #Find cd8 samples within data list that match metadata table
+cd8_immdata_mixcr <- list(data = cd8_mixed_data, meta = cd8_mixed_metadata) #combined object
+
+
+# Big object!
+all_immdata_mixcr <- list(data = all_mixed_data, meta = all_mixed_metadata)
+
+```
+
+
+```{r}
+# Extract COVID samples
+covid_metadata <- all_mixed_metadata %>% 
+  filter(pna_type_verified == "COVID-19")
+
+# Extract metadata for COVID-19 samples in CD4 and CD8 T cells
+covid_metadata_cd4 <- covid_metadata %>% 
+  filter(cell.type == "CD4")
+
+covid_metadata_cd8 <- covid_metadata %>% 
+  filter(cell.type == "CD8")
+
+# Combine mixcr data for COVID samples
+names(all_mixed_data) %in% covid_metadata$Sample
+covid_data <- all_mixed_data[names(all_mixed_data) %in% covid_metadata$Sample]
+covid_immdata_mixcr <- list(data = covid_data, meta = covid_metadata) # combined object
+  
+# COVID CD4 T cell samples
+names(all_mixed_data) %in% covid_metadata_cd4$Sample
+covid_data_cd4 <- all_mixed_data[names(all_mixed_data) %in% covid_metadata_cd4$Sample]
+covid_immdata_cd4_mixcr <- list(data = covid_data_cd4, meta = covid_metadata_cd4) # combined object
+
+# COVID CD8 T cell samples
+names(all_mixed_data) %in% covid_metadata_cd8$Sample
+covid_data_cd8 <- all_mixed_data[names(all_mixed_data) %in% covid_metadata_cd8$Sample]
+covid_immdata_cd8_mixcr <- list(data = covid_data_cd8, meta = covid_metadata_cd8) # combined object
+
+```
+
+```{r}
+## Demographics tables
+# Number of samples per patient
+IDs <- all_mixed_metadata %>% 
+  dplyr::count(study_id)
+
+# Number of samples per diagnosis
+Dxs <- all_mixed_metadata %>% 
+  dplyr::select(Diagnosis = pna_type_verified) %>% 
+  count(Diagnosis)
+
+# Arrange order
+Dxs$Diagnosis <- factor(Dxs$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot number of samples per pna category
+tcr_samples <- ggplot(Dxs, aes(x=Diagnosis, y=n, fill=Diagnosis) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of TCR-seq samples")
+
+tcr_samples
+
+# Save PDF
+ggsave(tcr_samples, filename = "tcr_samples.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+```{r}
+timing_samples <- all_mixed_metadata %>% 
+  dplyr::count(bal_timing)
+
+# Plot number of samples by early vs late
+bal_time <- ggplot(timing_samples, aes(x=bal_timing, y=n, fill=bal_timing) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = c("Early" = outcome_pal[2],
+                               "Late" = outcome_pal[5])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of TCR-seq samples")
+
+bal_time <- bal_time + labs(fill = "Timing of BAL\nrelative to intubation")
+bal_time 
+
+# Save PDF
+ggsave(bal_time, filename = "bal_time.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+
+```{r}
+# Number of pts per category with paired outcome
+oc <- all_mixed_metadata %>% 
+  dplyr::mutate(Patient = study_id, Diagnosis = pna_type_verified) %>% 
+  dplyr::count(Patient, Outcome, Diagnosis) 
+
+# Absolute patient number per diagnosis
+pt_dx <- oc %>%
+  dplyr::count(Diagnosis) 
+
+# Arrange order
+pt_dx$Diagnosis <- factor(pt_dx$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot number of patients per pna category
+pt_tcr <- ggplot(pt_dx, aes(x=Diagnosis, y=n, fill=Diagnosis) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+      scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of patients")
+
+pt_tcr
+
+# Save PDF
+ggsave(pt_tcr, filename = "pt_tcr.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+```{r}
+cell_subset_tcr <- all_mixed_metadata %>% 
+  dplyr::select(Sample, cell.type, Diagnosis = pna_type_verified) %>% 
+  dplyr::group_by(Diagnosis, cell.type) %>% 
+  summarise(cts = n()) %>% 
+  dplyr::rename('T cell subset' = cell.type) %>% 
+  ungroup()
+   
+ 
+# Factor
+cell_subset_tcr$Diagnosis <- factor(cell_subset_tcr$Diagnosis, 
+                                levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+ 
+# cell_subset_tcr$`T cell subset` <- factor(cell_subset_tcr$`T cell subset`,
+#                                     levels = "CD4", "CD8")
+
+# Plot
+cell_subset_tcr_plot <- ggplot(cell_subset_tcr, aes(x=Diagnosis, y=cts, fill=`T cell subset`) ) +
+  geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("CD4" = outcome_pal[2],
+                        "CD8" = outcome_pal[5])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Proportion")
+
+cell_subset_tcr_plot
+ 
+# Save PDF
+ggsave(cell_subset_tcr_plot, filename = "cell_subset_tcr_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+ 
+```{r}
+# Outcome table
+outc <- oc %>%
+  dplyr::count(Outcome)
+
+# Number of patients by simplified outcome and pna category
+dx_outc <- oc %>%
+  dplyr::count(Diagnosis, Outcome)
+
+# Factor
+dx_outc$Diagnosis <- factor(dx_outc$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+dx_outc$Outcome <- factor(dx_outc$Outcome, levels = c("Discharged", "Deceased"))
+
+# Stats
+simple_outcome <- table(all_mixed_metadata$pna_type_verified, all_mixed_metadata$Outcome)
+simple_outcome_stats <- pairwise.prop.test(simple_outcome, p.adjust.method = "fdr") # Not significant
+
+# Plot by simplified outcome
+mort <- ggplot(dx_outc, aes(x=Diagnosis, y=n, fill=Outcome) ) +
+  geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Mortality (Proportion)")
+
+mort
+
+# Save PDF
+ggsave(mort, filename = "mort.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Sex table
+ sex <- all_mixed_metadata %>% 
+    dplyr::mutate(Patient = study_id, Diagnosis = pna_type_verified) %>% 
+    dplyr::select(Sample, Patient, Diagnosis, gender)  %>% 
+    distinct(Patient, .keep_all = TRUE)
+  
+  sex_ct <- sex %>%
+    dplyr::count(Diagnosis, gender)
+  
+# Factor
+  sex_ct$Diagnosis <- factor(sex_ct$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+  sex_ct$Sex <- factor(sex_ct$gender, levels = c("Female", "Male"))
+  
+# Stats
+  sex_stats <- table(all_mixed_metadata$pna_type_verified, all_mixed_metadata$gender)
+  sex_stats <- pairwise.prop.test(sex_stats, p.adjust.method = "fdr") # Not significant
+  
+# Plot by sex
+sex <-   ggplot(sex_ct, aes(x=Diagnosis, y=n, fill=Sex)) +
+    geom_bar(position="fill", stat="identity") + 
+    theme_bw() +
+    theme(axis.text.x = element_text(angle=0, vjust=0.5)) +
+    scale_fill_manual(values = 
+                        c("Female" = outcome_pal[5],
+                          "Male" = outcome_pal[2])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+    labs(title="", 
+         subtitle="",
+         x="",
+         y=" Sex (Proportion)")
+  
+sex
+  
+ # Save PDF
+ggsave(sex, filename = "sex.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Plot SOFA scores per sample/pna_category
+ mean_sofa <- all_mixed_metadata %>% 
+  dplyr::mutate(Patient = study_id, Diagnosis = pna_type_verified) %>% 
+   dplyr::select(Sample, Patient, Diagnosis, mean_sofa) %>% 
+   distinct(Patient, .keep_all = TRUE)
+   
+ 
+ # Factor
+ mean_sofa$Diagnosis <- factor(mean_sofa$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+ 
+ 
+# PLot SOFA scores
+ shapiro.test(mean_sofa$mean_sofa)
+ sofa_comp = pairwise.wilcox.test(x = mean_sofa$mean_sofa,
+                                   g = mean_sofa$Diagnosis, 
+                                   p.adjust.method = "fdr") # Not significant
+ 
+ # Plot
+ sofa <- ggplot(mean_sofa, aes(y=mean_sofa, x=Diagnosis)) +
+   geom_boxplot(aes(fill = Diagnosis), outlier.shape = NA) + 
+   geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.5)) +
+   theme_bw() +
+   theme(axis.text.x = element_text(angle=0, vjust=0.5)) + 
+   scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                                "Other pneumonia" = pna_pal[3],
+                                "COVID-19" = pna_pal[1],
+                                "Other viral pneumonia" = pna_pal[4])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+   labs(title="", 
+        subtitle="",
+        x="",
+        y="Mean SOFA Score")
+ 
+ sofa
+ 
+ # Save PDF
+ggsave(sofa, filename = "sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC"
+
+dem_tot <- mort + sex + sofa +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+dem_tot
+
+# Save PDF
+ggsave(dem_tot, filename = "dem_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 16, height = 6, units = "in")
+```
+
+```{r}
+# TCR SFig 1
+layout <- "AABBCC
+           DDEEFF"
+
+tcr_sfig1 <- pt_tcr + cell_subset_tcr_plot + bal_time +
+             sofa + mort + sex +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 15))
+
+tcr_sfig1
+
+# Save PDF
+ggsave(tcr_sfig1, filename = "tcr_sfig1.pdf", dpi = 300, device = cairo_pdf,
+       width = 18, height = 16, units = "in")
+```
+
+
+```{r}
+## Diversity estimation
+# Chao1 diversity measure
+chao <- repDiversity(all_immdata_mixcr$data, "chao1")
+chao <- data.frame(Sample = row.names(chao), chao)
+rownames(chao) <- NULL
+
+# Filter NAs (6 samples without chao calculated) = total of 124 samples
+chao <- chao %>% 
+  drop_na(Estimator)
+
+# Join with metadata
+chao_metadata <- left_join(chao, all_mixed_metadata, by = "Sample")
+
+# Factor data
+chao_metadata$Diagnosis <- factor(chao_metadata$pna_type_verified, 
+                                       levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+chao_metadata$Outcome <- factor(chao_metadata$Outcome, 
+                                     levels = c("Discharged", "Deceased"))
+
+chao_metadata$dayETT <- factor(chao_metadata$dayETT,
+                                    levels = c("≤ 48hrs", "> 48hrs"))
+
+chao_metadata$Elder_status <- factor(chao_metadata$Elder_status, 
+                                    levels = c("≤ 65 years-old", "> 65 years-old"))
+
+chao_metadata$cov_status <- factor(chao_metadata$cov_status, 
+                               levels = c("Non-COVID-19", "COVID-19"))
+
+chao_metadata$Infection_status <- factor(chao_metadata$Superinfection_verified,
+                                    levels = c("Primary Only", "Superinfection", "VAP", "NA"))
+```
+
+```{r}
+# Overall richness by pna type
+# Stats - Non significant
+chao_stats = pairwise.wilcox.test(x = chao_metadata$Estimator, 
+                                   g = chao_metadata$Diagnosis, 
+                                   p.adjust.method = "fdr")
+# None significant
+
+# Plot
+chao_all <- ggplot(chao_metadata, aes(y=Estimator, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis ), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  # guides(color = "none") +
+  theme_bw() +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title=bquote(CD3^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Richness (Chao 1)")
+
+chao_all
+
+# Save PDF
+ggsave(chao_all, filename = "chao_all.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 6, units = "in")
+```
+
+```{r}
+# Divide by dayETT
+chao_metadata_stats = chao_metadata %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+chao_metadata_stats = pairwise.wilcox.test(chao_metadata_stats$Estimator,
+                                               chao_metadata_stats$combined, 
+                                               p.adjust.method = "none",
+                                               exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+chao_metadata_stats <- chao_metadata_stats[c(6, 13, 15), ] 
+
+chao_metadata_stats <- chao_metadata_stats %>% 
+  dplyr::mutate(yval = seq(from = 8000, by = 1000, length.out = nrow(.)))
+
+# Plot
+chao_all_2 <- ggplot(chao_metadata, aes(y=Estimator, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.4)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  geom_signif(inherit.aes = F,
+              data = chao_metadata_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  labs(title=bquote(CD3^'+'~T~ cells),
+       subtitle="",
+       x="",
+       y="Richness (Chao 1)")
+
+
+chao_all_2
+
+# Save PDF
+ggsave(chao_all_2, filename = "chao_all_2.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 6, units = "in")
+```
+
+```{r}
+# Divide by Outcome
+chao_outcome_stats = chao_metadata %>% 
+  mutate(combined = factor(paste(Diagnosis, Outcome, sep = ", ")))
+
+chao_outcome_stats = pairwise.wilcox.test(chao_outcome_stats$Estimator,
+                                          chao_outcome_stats$combined, 
+                                          p.adjust.method = "none",
+                                          exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+chao_outcome_stats <- chao_outcome_stats[c(13, 15),  ] 
+
+chao_outcome_stats <- chao_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 9000, by = 1000, length.out = nrow(.)))
+
+
+# Plot
+chao_all_3 <- ggplot(chao_metadata, aes(y=Estimator, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+    scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  geom_signif(inherit.aes = F, 
+              data = chao_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  labs(title=bquote(CD3^'+'~T~ cells),
+       subtitle="",
+       x="",
+       y="Richness (Chao 1)")
+
+chao_all_3
+
+# Save PDF
+ggsave(chao_all_3, filename = "chao_all_3.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 6, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AC
+           BC"
+chao_tot <- chao_all + chao_all_2 + chao_all_3 + 
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+chao_tot
+
+# Save PDF
+ggsave(chao_tot, filename = "chao_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+
+```{r}
+## Is there decline of TCR repertoire diversity with age in all pna groups?
+# Correlate T cells (all samples) with age (Chao1)
+
+colors <- colorRampPalette(brewer.pal(9, "Pastel1"))(50)
+
+# Plot
+age_tcr_div <- ggplot(chao_metadata, aes(x=age, y=Estimator)) + 
+  geom_point(aes(col=study_id, shape=Outcome), size = 3.5) +
+  scale_color_manual(values = colors) +
+  facet_wrap(~ cov_status) +
+  guides(color = "none") +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(method = "lm",
+              se = T,
+              fullrange = T,
+              color = "black",
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  stat_cor(method = "pearson", 
+           label.x = 30, 
+           label.y = 8000) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0),
+        plot.subtitle = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(subtitle="", # T cells in non-COVID-19 groups (n = 55 samples from 30 patients)
+       y="Richness (Chao 1)", 
+       x="Age (Years)", 
+       title="") 
+
+age_tcr_div
+
+# Save PDF
+ggsave(age_tcr_div, filename = "age_tcr_div.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 6, units = "in")
+```
+
+```{r}
+# Does TCR richness change during MV in pna?
+div_tcr_mv <- ggplot(chao_metadata, aes(x=finite_day_of_intubation, y=Estimator)) +  
+  geom_point(aes(col=Infection_status, shape=Outcome), size = 3.5) +
+  facet_wrap(~ cov_status) + 
+  scale_color_manual(values = c("Primary Only" = infection_pal[6],
+                                "Superinfection" = infection_pal[5],
+                                "VAP" = infection_pal[10])) +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(method = "lm",
+              se = T,
+              fullrange = T,
+              color = "black",
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  stat_cor(method = "pearson", 
+           label.x = 10, 
+           label.y = 8000,
+           cor.coef.size = 6) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0),
+        plot.subtitle = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(subtitle="", #T cells in COVID-19 (n = 67 samples from 16 patients)
+       y="Richness (Chao 1)", 
+       x="Days from intubation", 
+       title="") 
+
+div_tcr_mv
+
+# Save PDF
+ggsave(div_tcr_mv, filename = "div_tcr_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 6, units = "in")
+```
+
+```{r}
+# Is decline in richness related to infection status in COVID-19 pts?
+# Plot
+div_is <- ggplot(chao_covid_metatada, aes(y=Estimator, x=Outcome)) +
+  geom_boxplot(aes(fill = Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Discharged" = outcome_pal[2],
+                                "Deceased" = outcome_pal[5])) +
+  facet_grid(Infection_status ~ .) +
+  stat_compare_means(method = "wilcox", label.y = 7000, label.x = 1.5, size = 3.5) +
+  theme(text = element_text(family = "Arial", size = 16),
+        axis.text = element_text(size = 12, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="", 
+       x="",
+       y="Richness (Chao 1")
+
+div_is
+
+# Save PDF
+ggsave(div_is, filename = "div_is.pdf", dpi = 300, device = cairo_pdf,
+       width = 7.5, height = 6.5, units = "in")
+```
+
+
+```{r}
+# Patch
+layout <- "AABBC"
+
+div_tot <- age_tcr_div + div_tcr_mv + div_is +
+  plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical')
+
+div_tot
+
+# Save PDF
+ggsave(div_tot, filename = "div_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 6, units = "in")
+```
+
+
+```{r}
+# TCR supp fig 2
+# Patch
+layout <- "AAABBBCCC
+           DDDDDDDDD"
+
+tcr_sfig2 <- chao_all + chao_all_2 + chao_all_3 + 
+             div_tot +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical') & 
+  theme(plot.tag = element_text(face = 'bold', size = 14))
+
+tcr_sfig2
+
+# Save PDF
+ggsave(tcr_sfig2, filename = "tcr_sfig2.pdf", dpi = 300, device = cairo_pdf,
+       width = 17, height = 15, units = "in")
+```
+
+
+
+
+
+
+

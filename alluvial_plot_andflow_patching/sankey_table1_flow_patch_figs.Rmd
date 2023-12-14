@@ -1,0 +1,409 @@
+# Continuation of flow cytometry analysis...
+
+```{r}
+## Let's make alluvial plot for BAL samples to depict cohort anatomy (Fig 1)
+allu_facs <- script_md %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified) %>% 
+  dplyr:: mutate(study_id = substr(script_md$tc_pt_study_id, 1,4))
+
+# Keep only my study 432 FACS samples
+allu_facs <- left_join(all_facs_samples, allu_facs, by = "tc_pt_study_id")
+
+# Bulk RNA-seq (336 samples from 420 after QC/filtering)
+rna_cd8 <- cd8_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified, cell_type2)
+rownames(rna_cd8) = NULL
+
+rna_cd4 <- cd4_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified, cell_type2)
+rownames(rna_cd4) = NULL
+
+rna_treg <- treg_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified, cell_type2)
+rownames(rna_treg) = NULL
+
+# Bulk TCR-seq (130 samples)
+allu_tcr <- all_mixed_metadata %>% 
+  dplyr::select(tc_pt_study_id, study_id, pna_type_verified, cell_type2 = cell.type) %>% 
+  dplyr::mutate(combined = factor(paste(tc_pt_study_id, pna_type_verified, cell_type2, sep = ", ")))
+
+
+# Join all
+allu_rna <- bind_rows(rna_cd8, rna_cd4, rna_treg) %>% 
+  dplyr::mutate(study_id = substr(allu_rna$tc_pt_study_id, 1,4), 
+                combined = factor(paste(tc_pt_study_id, pna_type_verified, cell_type2, sep = ", "))) %>% 
+  remove_rownames()
+```
+
+
+```{r}
+# Create df for rna-seq metadata of interest
+# Read anonymous pt id table. Also added 3 TCR samples not in RNA samples (total pts should be 116 instead of 113)
+allu_rna_id_anonym <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/allu_rna_id_anonym.csv")
+allu_rna_id_anonym$study_id <- as.character(allu_rna_id_anonym$study_id)
+
+allu_rna_md <- bind_rows(rna_cd8, rna_cd4, rna_treg) %>% 
+  dplyr::mutate(study_id = substr(allu_rna$tc_pt_study_id, 1,4))
+  
+allu_rna_md <- left_join(allu_rna_md, allu_rna_id_anonym, by = "study_id") %>% 
+  dplyr::select(-study_id)
+
+# Script md for final table
+rna_md <- script_metadata_bulk %>% 
+  dplyr::select(tc_pt_study_id, age, sex = gender, Outcome, 'Infection status' = Superinfection_verified, day_of_intubation)
+  
+# Final df
+allu_rna_metadata <- left_join(allu_rna_md, rna_md, by = "tc_pt_study_id")
+  
+allu_rna_metadata <- allu_rna_metadata %>% 
+  dplyr::mutate(anonym_pt_study_id = gsub("^[^-]+", "", allu_rna_metadata$tc_pt_study_id))
+  
+allu_rna_metadata$Anonymized_pt_study_id <- paste(allu_rna_metadata$Anonymized_id, allu_rna_metadata$anonym_pt_study_id) 
+
+rna_metadata <- allu_rna_metadata %>% 
+  dplyr::select(Anonymized_id, Anonymized_pt_study_id, Cell = cell_type2, Diagnosis = pna_type_verified, Age = age, Sex = sex, 
+                Outcome, 'Infection status', 'Days from intubation' = day_of_intubation)
+  
+# Save metadata
+write.csv(rna_metadata, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/rna_metadata.csv")
+```
+
+
+```{r}
+# Prepare alluvial data for plot
+allu_samples =  allu_facs %>% 
+  dplyr::select(study_id, tc_pt_study_id, pna_type_verified) %>% 
+  dplyr::mutate('Flow cytometry' = TRUE) %>% 
+  left_join(allu_rna %>% 
+              dplyr::group_by(tc_pt_study_id, pna_type_verified) %>% 
+              dplyr::summarise(combined = dplyr::first(combined)), 
+            by = c("tc_pt_study_id", "pna_type_verified")) %>% 
+  full_join(allu_rna %>% 
+              dplyr::mutate('Bulk RNA-seq' = TRUE), 
+            by = c("combined", "pna_type_verified")) %>% 
+  left_join(allu_tcr %>% 
+              dplyr::group_by(tc_pt_study_id, pna_type_verified) %>% 
+              dplyr::summarise(combined = dplyr::first(combined)) %>% 
+              dplyr::rename(combined_tcr = combined),
+            by = c("tc_pt_study_id.x" = "tc_pt_study_id", "pna_type_verified")) %>% 
+  full_join(allu_tcr %>% 
+              dplyr::mutate('Bulk TCR-seq' = TRUE), 
+            by = c("combined", "pna_type_verified")) %>% 
+  dplyr::mutate(Diagnosis = pna_type_verified)
+
+# Verify number of samples is correct
+dim(allu_samples)
+sum(!is.na(allu_samples$`Flow cytometry`)) # 433
+sum(!is.na(allu_samples$`Bulk RNA-seq`)) # 336
+sum(!is.na(allu_samples$`Bulk TCR-seq`)) # 130
+
+# Count for Nik's schematic
+allu_samples_facs <- allu_samples %>% 
+  dplyr::filter(Analysis == 'Flow cytometry')
+  
+table(allu_samples_facs$pna_type_verified)
+
+#     COVID-19 Non-pneumonia control       Other pneumonia 
+#                  165                    36                   187 
+#    Other viral pneumonia 
+#                   44 
+
+allu_samples_rna4 <- allu_samples %>% 
+  dplyr::filter(Analysis == 'Bulk RNA-seq' & cell_type2.x == "CD4")
+  
+table(allu_samples_rna4$pna_type_verified)
+
+#             COVID-19 Non-pneumonia control       Other pneumonia 
+#                   81                    14                    23 
+#Other viral pneumonia 
+#                   20 
+
+allu_samples_rna8 <- allu_samples %>% 
+  dplyr::filter(Analysis == 'Bulk RNA-seq' & cell_type2.x == "CD8")
+  
+table(allu_samples_rna8$pna_type_verified)
+
+#             COVID-19 Non-pneumonia control       Other pneumonia 
+#                   72                    15                    15 
+#Other viral pneumonia 
+#                   23 
+
+allu_samples_treg <- allu_samples %>% 
+  dplyr::filter(Analysis == 'Bulk RNA-seq' & cell_type2.x == "Treg")
+  
+table(allu_samples_treg$pna_type_verified)
+
+#             COVID-19 Non-pneumonia control       Other pneumonia 
+#                   47                     9                    13 
+#Other viral pneumonia 
+#                    4 
+
+allu_samples_tcr4 <- allu_samples %>% 
+  dplyr::filter(Analysis == 'Bulk TCR-seq' & cell_type2.y == "CD4")
+  
+table(allu_samples_tcr4$pna_type_verified)
+
+#             COVID-19 Non-pneumonia control       Other pneumonia 
+#                   37                     6                     8 
+#Other viral pneumonia 
+#                   13 
+                   
+allu_samples_tcr8 <- allu_samples %>% 
+  dplyr::filter(Analysis == 'Bulk TCR-seq' & cell_type2.y == "CD8")
+  
+table(allu_samples_tcr8$pna_type_verified)
+
+#             COVID-19 Non-pneumonia control       Other pneumonia 
+#                   36                     7                     8 
+#Other viral pneumonia 
+#                   15 
+                   
+
+# Pivot
+allu_samples <- allu_samples %>% 
+  pivot_longer(cols =  c("Flow cytometry", "Bulk RNA-seq", "Bulk TCR-seq"),
+               names_to = "Analysis",
+               values_to = "Done") %>% 
+  dplyr::filter(Done == T & !is.na(Diagnosis)) %>% 
+  dplyr::select(-Done) %>% 
+  mutate(Analysis = factor(Analysis,
+                           levels = c("Flow cytometry", "Bulk RNA-seq", "Bulk TCR-seq")))
+
+# Verify numbers of samples again
+table(allu_samples$Analysis)
+
+# Remove study_id.x column
+allu_samples = allu_samples[,-1]
+
+allu_samples$combined <- as.character(allu_samples$combined)
+allu_samples$combined_tcr <- as.character(allu_samples$combined_tcr)
+
+# Find values that don't have Bulk RNA-seq rows (CA, HF, MK). For these values we will add fake Bulk RNA-seq tag
+add_bulk <- setdiff(allu_samples$combined, allu_samples$combined[allu_samples$Analysis == "Bulk RNA-seq"])
+add_bulk <- add_bulk[!is.na(add_bulk)]  
+add_bulk <- data.frame(
+  combined = add_bulk,
+  Analysis = "Bulk RNA-seq",
+  Diagnosis = "FAKE")
+
+# Bind
+allu_samples <- bind_rows(allu_samples, add_bulk) %>% 
+  mutate(Analysis = factor(Analysis,
+                           levels = c("Flow cytometry", "Bulk RNA-seq", "Bulk TCR-seq")))
+
+# Set `combined` variable for FACS-only samples
+# Case 1: combined is NA but combined_tcr is not NA => set combined = combined_tcr
+idx <- (allu_samples$Analysis == "Flow cytometry") & is.na(allu_samples$combined) & !is.na(allu_samples$combined_tcr)
+allu_samples$combined[idx] <- allu_samples$combined_tcr[idx]
+# Case 2: combined is NA, so they don't have Bulk RNA => set combined to just sample ID
+idx <- (allu_samples$Analysis == "Flow cytometry") & is.na(allu_samples$combined)
+allu_samples$combined[idx] <- allu_samples$tc_pt_study_id.x[idx]
+
+# Factor
+allu_samples <-  allu_samples %>% 
+  dplyr::mutate(Diagnosis = factor(Diagnosis,
+                                   levels = c("FAKE", "Non-pneumonia control", "Other pneumonia", 
+                                              "COVID-19", "Other viral pneumonia")),
+                hide = Diagnosis == "FAKE")
+
+# Set to alluvial data
+is_alluvia_form(allu_samples, Analysis, Diagnosis, combined)
+
+sum(duplicated(allu_samples$combined[allu_samples$Analysis == 'Flow cytometry']))
+
+
+```
+
+
+```{r}
+# Plot
+allu_bal <- ggplot(allu_samples, aes(x = Analysis, 
+                              stratum = Diagnosis,
+                              alluvium = combined,
+                              fill = Diagnosis, 
+                              label = Diagnosis)) +
+  scale_fill_manual(name = "",
+                    values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4],
+                               "FAKE" = "white")) +
+  geom_alluvium() +
+  geom_stratum(aes(alpha = hide, color = hide)) +
+  scale_color_manual(name = "",
+                     values = c("FALSE" = "black",
+                                "TRUE" = alpha("white", 0))) +
+  scale_alpha_manual(name = "",
+                     values = c("FALSE" = 1,
+                                "TRUE" = 0)) +
+  scale_x_discrete(expand = c(.1, .1)) +
+  theme_bw(base_family = "Arial") +
+    # geom_text(
+    # aes(label = Analysis, y = Diagnosis + 0.05),
+    # position = position_dodge(0.9),
+    # vjust = 0) +
+  scale_y_continuous(limits = c(0, 450), breaks = seq(0, 450, by = 100)) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.text.y = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_blank(),panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),plot.background=element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 14)) +
+ scale_x_discrete(labels = c("Flow\nCytometry", "Bulk\nRNA-seq", "Bulk\nTCR-seq")) +
+  ggtitle("") +
+  ylab("BAL samples") +
+  xlab("") 
+
+allu_bal
+
+# Save PDF
+ggsave(allu_bal, filename = "allu_bal.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+
+
+```{r}
+# Patch figures
+# Fig 1
+layout <- "AAABBBBB
+           CCDDEEFF
+           #GGGGGG#"
+
+fig_1 <- ggplotify::as.ggplot(allu_bal) + ggplotify::as.ggplot(hm1) +
+           cd1 + cor1 + out1 + outd1 +
+           ggplotify::as.ggplot(cor_hm_cov) +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout, guides = "collect", heights = c(1.5,1,1.5)) & 
+    theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 20))
+
+fig_1
+
+# Save PDF
+ggsave(fig_1, filename = "fig_1.pdf", dpi = 300, device = cairo_pdf,
+       width = 24, height = 24, units = "in")
+```
+
+
+
+
+```{r}
+# Supp Fig 1
+layout <- "AAAAAAAABBCCDDEE
+           AAAAAAAA#FFGGHH#
+           IIIJJJKKK#LLLMMM
+           NNNNOOOO##PPPP##
+           QQQQRRRR##SSSS##"
+
+sfig_1 <- ggplotify::as.ggplot(hm2) + ct1 + ct2 + ct3 + ct4 +
+           ct5 + ct6 + ct7 +
+           cd3 + cd4 + cd5  +  cd2 + cor2 +
+           cd6 + cor3 + is2 + 
+           cd7 + cor4 + is1 +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout, guides = "collect") & 
+    theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 25))
+
+sfig_1
+
+# Save PDF
+ggsave(sfig_1, filename = "sfig_1.pdf", dpi = 300, device = cairo_pdf,
+       width = 40, height = 35, units = "in")
+```
+
+
+```{r}
+# Supp Fig 2
+layout <- "AABBCCDD
+           EEFFGGHH
+           IIJJKKLL
+           ##MMNN##"
+
+sfig_2 <-  out2 + outd2 + out7 + outd7 +
+           out3 + outd3 + out6 + outd6 +
+           out4 + outd4 + out5 + outd5 +
+           c1 + c2 +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 20))
+
+sfig_2
+
+# Save PDF
+ggsave(sfig_2, filename = "sfig_2.pdf", dpi = 300, device = cairo_pdf,
+       width = 30, height = 30, units = "in")
+```
+
+
+```{r}
+# Supp Fig 3
+layout <- "A
+           B
+           C
+           D"
+
+ sfig_3 <- cor_hm_npc +
+           cor_hm_op +
+           cor_hm_ovp +
+           cor_hm2 +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 16))
+
+sfig_3
+
+# Save PDF
+ggsave(sfig_3, filename = "sfig_3.pdf", dpi = 300, device = cairo_pdf,
+       width = 16, height = 20, units = "in")
+```
+
+
+
+
+```{r}
+## Supplemental table 1 
+supp_table_1 <-  read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/supp_table_1.csv")
+
+# Make and save nice table
+formattable(supp_table_1)
+
+supp_table_1 <- formattable(supp_table_1,
+align =c("l","c","c","c","c", "c"), 
+list(Patient = formatter(
+  "span", style = ~ style(color = "grey",font.weight = "bold")) 
+))
+
+# Save
+export_formattable <- function(f, file, width = "100%", height = NULL, 
+                               background = "white", delay = 0.2)
+{
+  w <- as.htmlwidget(f, width = width, height = height)
+  path <- html_print(w, background = background, viewer = NULL)
+  url <- paste0("file:///", gsub("\\\\", "/", normalizePath(path)))
+  webshot(url,
+          file = file,
+          selector = ".formattable_widget",
+          delay = delay)
+}
+
+export_formattable(supp_table_1,"supp_table_1.png")
+
+export_formattable(
+  supp_table_1,
+  "supp_table_1.pdf",
+  width = "100%",
+  height = "100%",
+  background = "white",
+  delay = 10
+)
+```
+
+# DONE

@@ -1,0 +1,4007 @@
+---
+title: "Flow cytometry analysis of BAL samples"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: analyze alveolar immune cell subset abundance and correlate with clinical outcomes during severe pneumonia
+---
+
+```{r}
+# Set working directory
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/")
+
+library(devtools)
+library(dplyr)
+library(tydiverse)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(ggsignif)
+library(stringi)
+library(ggsci)
+library(janitor)
+library(RColorBrewer)
+library(patchwork)
+library(ggalluvial)
+library(ggnewscale)
+library(extrafont)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(gridtext)
+library(formattable)
+library(htmltools)
+
+
+# Set seed
+set.seed(8271)
+
+# Palettes
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+infection_pal = pal_npg("nrc")(10)
+
+```
+
+
+```{r}
+### ALL SAMPLES  T cells
+## Analysis with all samples from study_id: [redacted]
+# Load FACS 5L data
+COVID_SCRIPT_5L_Aria_Tregs <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/20200707_COVID_SCRIPT_5L_Aria_Tregs.xlsx")
+five_laser <- as_tibble(COVID_SCRIPT_5L_Aria_Tregs)
+
+# Add tc_pt_study_id column (144 samples)
+five_laser$tc_pt_study_id <-  substr(five_laser$Sample, 10,20) 
+
+# Select relevant columns for analysis
+five_laser <- five_laser %>%  
+  dplyr::select(2:10, 13:21, 23:27)
+
+# Drop NAs (6 rows)
+five_laser <- five_laser %>%   
+  drop_na()
+
+# Select columns for percentages
+five_laser_pt <- five_laser %>%  
+  dplyr::select(10:14, 17:18, 23)
+
+five_laser_pt <- five_laser_pt %>% 
+  dplyr::rename("CD3 T cells" = "CD3 T cells...13", 
+                "CD4 T cells" = "CD4 T cells...14",
+                "CD8 T cells" = "CD8 T cells...15", 
+                "Neutrophils" = "Neutrophils...16",
+                "Macrophages" = "Macrophages...17", 
+                "Monocytes" = "Monocytes...20", 
+                "Treg cells" = "Treg cells...21")
+
+# Check for duplicates - NONE
+duplicated(five_laser_pt$tc_pt_study_id)
+
+# Load FACS 6L data
+Pre_COVID_SCRIPT_6L_Aria_Treg <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/20200701_Pre-COVID_SCRIPT_6L_Aria_Treg.xlsx")
+six_laser <- as_tibble(Pre_COVID_SCRIPT_6L_Aria_Treg)
+
+# Add tc_pt_study_id column
+six_laser$tc_pt_study_id <-  substr(six_laser$Sample, 10,20) 
+
+# Select relevant columns for analysis
+six_laser <- six_laser %>%  
+  dplyr::select(2:12, 15:23, 25:29)
+
+# Select columns for percentages
+six_laser_pt <- six_laser %>%  
+  dplyr::select(12:16, 19:20, 25)
+
+# Check for duplicates - NONE
+duplicated(six_laser_pt$tc_pt_study_id)
+
+# Load additional samples file
+additional_samples <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/additional_samples.xlsx")
+additional_samples <- as_tibble(additional_samples )
+
+# Add tc_pt_study_id column
+additional_samples$tc_pt_study_id <-  substr(additional_samples$Sample, 10,20) 
+
+# Additional samples %s
+additional_samples_pt <- additional_samples %>% 
+  dplyr::select(13:17, 20:21, 27)
+duplicated(additional_samples_pt$tc_pt_study_id)
+
+additional_samples_pt <- additional_samples_pt %>%
+  dplyr::rename("CD3 T cells" = "CD3 T cells...13",
+                "CD4 T cells" = "CD4 T cells...14",
+                "CD8 T cells" = "CD8 T cells...15",
+                "Neutrophils" = "Neutrophils...16",
+                "Macrophages" = "Macrophages...17",
+                "Monocytes" = "Monocytes...20",
+                "Treg cells" = "Treg cells...21")
+
+# Add additional 5l samples to 5l object
+five_laser_pt <- bind_rows(five_laser_pt, additional_samples_pt)
+duplicated(five_laser_pt$tc_pt_study_id)
+five_laser_pt$tc_pt_study_id[duplicated(five_laser_pt$tc_pt_study_id)] 
+
+# Add additional samples missing from 5l
+additional_samples_5l.2 <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/20220425_additional_samples.xlsx")
+
+# Add tc_pt_study_id column
+additional_samples_5l.2$tc_pt_study_id <-  substr(additional_samples_5l.2$Sample, 10,20) 
+
+# Additional sample %s from 4/25/22
+additional_samples_perc_5l.2 <- additional_samples_5l.2 %>% 
+  dplyr::select(13:17, 20:21, 27)
+
+# Drop NAs (6 rows)
+additional_samples_perc_5l.2 <- additional_samples_perc_5l.2 %>%   
+  drop_na()
+
+additional_samples_perc_5l.2 <- additional_samples_perc_5l.2 %>% 
+  dplyr::rename("CD3 T cells" = "CD3 T cells...13", 
+                "CD4 T cells" = "CD4 T cells...14",
+                "CD8 T cells" = "CD8 T cells...15", 
+                "Neutrophils" = "Neutrophils...16",
+                "Macrophages" = "Macrophages...17", 
+                "Monocytes" = "Monocytes...20", 
+                "Treg cells" = "Treg cells...21")
+
+additional_samples_perc_5l.2 <- additional_samples_perc_5l.2 %>% 
+  distinct()
+
+duplicated(additional_samples_perc_5l.2$tc_pt_study_id)
+additional_samples_perc_5l.2$tc_pt_study_id[duplicated(additional_samples_perc_5l.2$tc_pt_study_id)] 
+
+## Merge all flow samples (total of 432 samples)
+all_facs_samples <- bind_rows(five_laser_pt, six_laser_pt)
+all_facs_samples <- bind_rows(all_facs_samples, additional_samples_perc_5l.2)
+
+# Verify duplicates - none
+duplicated(all_facs_samples$tc_pt_study_id)
+all_facs_samples$tc_pt_study_id[duplicated(all_facs_samples$tc_pt_study_id)] 
+
+
+# Total of 432 unique samples with flow data 
+all_facs_samples <- all_facs_samples %>% 
+  distinct(tc_pt_study_id, .keep_all = T)
+
+# Replace erronous callout for sample [redacted]
+all_facs_samples <- all_facs_samples %>% 
+  dplyr::mutate(`CD3 T cells` = if_else(tc_pt_study_id == "[redactede]", 82.87, `CD3 T cells`))
+
+duplicated(all_facs_samples$tc_pt_study_id)
+
+# Save
+write.csv(all_facs_samples, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/all_facs_samples.csv")
+```
+
+
+```{r}
+## load SCRIPT medatada
+# Upload updated metadata from Rogan
+script_metadata <- readRDS("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/2022-04-25_SCRIPT_cytokines_metadata.rds") 
+
+# Change samples [redacted] to [redacted] per adjudication and eliminate sample DE-BAL-00 (as it is DE_BAL-01)
+script_metadata$tc_pt_study_id <- str_replace(script_metadata$tc_pt_study_id, "[redacted]", "[redacted]")
+script_metadata <- script_metadata %>% 
+  dplyr::filter(tc_pt_study_id != "DE-BAL-00")
+
+# Upload verified dx and superifnection status from Ben
+dx_verification_3 <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/dx_verification_3.xlsx") 
+dx <- dx_verification_3 %>% 
+  dplyr::select(Sample_ID, pna_type_verified, Superinfection_verified) %>% 
+  dplyr::rename(tc_pt_study_id = Sample_ID)
+
+# Final metadata df
+script_metadata.2 <- left_join(script_metadata, dx, by = "tc_pt_study_id") 
+
+# Adjust binned and binary outcomes
+script_metadata.2$binned_outcome <- str_replace(script_metadata.2$binned_outcome, "Other", "Inpatient Facility")
+
+# Select ALL flow samples included in pt cohort (study_id: [redacted])
+script_md <- script_metadata.2 %>% 
+  dplyr::arrange(tc_pt_study_id) %>% 
+  dplyr::slice(1:544) 
+
+# Add missing age for sample  [redacted]
+script_md <- script_md %>% 
+  dplyr::mutate(age = if_else(tc_pt_study_id == "[redacted]", 72, age))
+
+
+# Add simplified outcome
+script_md <- script_md %>% 
+  mutate(Outcome = case_when(stri_detect_fixed(binned_outcome, "Deceased") ~ "Deceased",
+                             stri_detect_fixed(binned_outcome, "Home") ~ "Discharged",
+                             stri_detect_fixed(binned_outcome, "Inpatient Facility") ~ "Discharged",
+                             stri_detect_fixed(binned_outcome, "LTAC") ~ "Discharged",
+                             TRUE  ~ "Default"))
+
+# Add missing data for samples [redacted] and KK-BAL-64
+script_md <- script_md %>% 
+  add_row(tc_pt_study_id = "[redacted]", pna_type_verified = "COVID-19",
+          Superinfection_verified = "Primary Only", day_of_intubation = 22,
+          binned_outcome = "LTAC", Outcome = "Discharged", age = 66)
+
+script_md <- script_md %>% 
+  add_row(tc_pt_study_id = "KK-BAL-64", pna_type_verified = "COVID-19",
+          Superinfection_verified = "Superinfection", day_of_intubation = 72,
+          binned_outcome = "Deceased", Outcome = "Deceased", age =  51)
+
+# Check for duplicates
+duplicated(script_md$tc_pt_study_id)
+script_md$tc_pt_study_id[duplicated(script_md$tc_pt_study_id)] # None
+```
+
+```{r}
+# Find missing pt ID that need flow data (424 unique samples? -- 432 really)
+facs_endpts <- inner_join(all_facs_samples, script_md, by = "tc_pt_study_id") %>%
+  distinct(tc_pt_study_id, .keep_all = T)
+
+# Transform string NAs
+facs_endpts$Superinfection_verified[facs_endpts$Superinfection_verified == "NA"] <- NA
+
+# Add day of intubation data for sample [redacted]
+facs_endpts <- facs_endpts %>% 
+ replace_na(list(day_of_intubation = 1)) 
+
+#add finite days
+facs_endpts$finite_day_of_intubation = facs_endpts$day_of_intubation
+facs_endpts$finite_day_of_intubation[is.infinite(facs_endpts$finite_day_of_intubation)] = NA
+
+# Arrange for unclustered plot
+facs_endpts <- facs_endpts %>%
+  mutate(pna_type_verified = factor(pna_type_verified,
+                               levels = c("Non-pneumonia control", "Other pneumonia", "Other viral pneumonia", "COVID-19"))) %>%
+  arrange(pna_type_verified, finite_day_of_intubation) %>%
+  distinct()
+
+## Prepare matrix data
+merge_facs_endpts <- facs_endpts %>%  
+  remove_rownames() %>% 
+  column_to_rownames(var = "tc_pt_study_id") 
+
+# Select cell subset %
+merge_matrix_facs_endpts <- merge_facs_endpts %>%  
+  dplyr::select(2:7) %>% 
+  t()
+
+# Cluster by rows for complexheatmap (CH)
+mat <- t(scale(t(merge_matrix_facs_endpts)))
+
+# Arrange rownames
+rownames(mat) = c("CD4 T cells", "CD8 T cells", "Neutrophils", "Macrophages", "Monocytes", "Treg cells")
+
+## Plot
+# Prepare additional data frame for annotation cols
+annotation_col <- facs_endpts %>% 
+  dplyr::select(Diagnosis = pna_type_verified, Outcome, #  Age = age
+                tc_pt_study_id, 'Days from intubation' = finite_day_of_intubation, 
+                'Infection status' = Superinfection_verified) %>% 
+  remove_rownames() %>% 
+  column_to_rownames("tc_pt_study_id") 
+
+# Factor
+annotation_col$Outcome <- factor(annotation_col$Outcome,
+                                         levels = c("Discharged", "Deceased"))
+
+annotation_col$Diagnosis <- factor(annotation_col$Diagnosis,
+                                 levels = c("Non-pneumonia control", "Other pneumonia",  "COVID-19", "Other viral pneumonia"))
+
+annotation_col$'Infection status' <- factor(annotation_col$'Infection status',
+                                                 levels = c("Primary Only", "Superinfection", "VAP"))
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha = HeatmapAnnotation(df = annotation_col,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                              "Superinfection" = infection_pal[5],
+                                              "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis = list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+```
+
+```{r}
+# Plot (Clustered)
+set.seed(8271)
+hm1 <- Heatmap(mat,
+        name = "mat",
+        col = col_fun,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        clustering_distance_columns = "euclidean",
+        clustering_distance_rows = "euclidean",
+        clustering_method_columns = 'ward.D2',
+        clustering_method_rows = 'ward.D2',
+        show_column_names = FALSE,
+        row_km = 3,
+        column_km = 3,
+        # row_split = 3,
+        row_title = "Alveolar immune cell subsets",
+        column_title = "BAL samples",
+        # column_split = 3,
+        row_gap = unit(2, "mm"),
+        column_gap = unit(2, "mm"),
+        # row_names_gp = gpar(fontsize = 12, fontface = 'bold'),
+        row_labels = expression(CD4^'+'~T~ cells, CD8^'+'~T~ cells, "Neutrophils", "Macrophages", "Monocytes", 'Treg cells'),
+        top_annotation = ha, 
+        heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+hm1
+
+hm1 <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(hm1, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+hm1
+
+# Save PDF
+pdf("/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/hm1.pdf", width=10, height=5)
+print(hm1)
+dev.off()
+
+```
+
+```{r}
+# Plot (Unclustered)
+hm2 <- Heatmap(mat,
+        name = "mat",
+        col = col_fun,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        clustering_distance_columns = "euclidean",
+        clustering_distance_rows = "euclidean",
+        clustering_method_columns = 'ward.D2',
+        clustering_method_rows = 'ward.D2',
+        show_column_names = FALSE,
+        row_title = "Alveolar immune cell subsets",
+        row_title_gp = gpar(fontsize = 12),
+        # row_names_gp = gpar(fontsize = 12, fontface = 'bold'),
+        row_labels = expression(CD4^'+'~T~ cells, CD8^'+'~T~ cells, "Neutrophils", "Macrophages", "Monocytes", 'Treg cells'),
+        top_annotation = ha, 
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+hm2
+
+hm2 <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(hm2,
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+hm2
+
+# Save as PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/hm2.pdf", width=10, height=5)
+print(hm2)
+dev.off()
+```
+
+```{r}
+# Percent of superifnection in OVP and COVID-19
+facs_endpts <- facs_endpts %>% 
+  dplyr::mutate(Superinfection_combined = 
+                  case_when(
+                  str_detect(Superinfection_verified, "Primary Only") ~ "Primary Only",
+                  str_detect(Superinfection_verified, "Superinfection") ~ "Superinfection",
+                  str_detect(Superinfection_verified, "VAP") ~ "Superinfection",
+                  TRUE ~ NA ))
+                  
+# Obtain percentages
+co_inf_ovp <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "Other viral pneumonia") %>% 
+  dplyr::group_by(Superinfection_combined) %>% 
+  summarise(cts = n()) %>% 
+  dplyr::mutate(pct = cts / sum(cts)*100) %>% 
+  ungroup()
+
+co_inf_cov <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::group_by(Superinfection_combined) %>% 
+  summarise(cts = n()) %>% 
+  dplyr::mutate(pct = cts / sum(cts)*100) %>% 
+  ungroup()
+
+# Stats
+co_inf <- facs_endpts %>% 
+  dplyr::filter(Diagnosis == "COVID-19" | Diagnosis == "Other viral pneumonia") %>% 
+  dplyr::group_by(Superinfection_combined, Diagnosis) %>% 
+  summarise(cts = n()) %>% 
+  drop_na() %>% 
+  ungroup()
+
+# Pivot
+co_inf_wide <- co_inf %>%
+  pivot_wider(names_from =  "Diagnosis",
+              values_from = "cts")
+
+# Make outcome into rownames
+co_inf_wide <- co_inf_wide %>%
+  remove_rownames() %>%
+  column_to_rownames(var = "Superinfection_combined") 
+
+# Fisher exact test
+test <- fisher.test(co_inf_wide)
+# p-value = 0.6032
+
+```
+```{r}
+## Quantify alveolar immune cell subset abundance by pna category and cell type (ALL samples from cohort)
+# Factor
+facs_endpts$Diagnosis <- factor(facs_endpts$pna_type_verified, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+## CD3 T cells
+
+kruskal.test(`CD3 T cells` ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 52.697, df = 3, p-value = 2.127e-11
+
+stats_cd3 = pairwise.wilcox.test(facs_endpts$`CD3 T cells`, 
+                                             facs_endpts$Diagnosis, 
+                                             p.adjust.method = "fdr") %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+  
+# Plot 
+ct1 <- ggplot(facs_endpts, aes(y=`CD3 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 20)) +
+  labs(title="CD3+ T cells", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct1
+
+ct1 <- ct1 + geom_signif(y_position=c(100, 100),
+                xmin = c("COVID-19", 3.2), xmax = c("Other pneumonia", 2.2),
+                annotations = c("1.26e-11"),
+                tip_length = 0.01,
+                textsize = 4) +
+  
+  geom_signif(y_position = c(110), 
+              xmin = c("Other pneumonia", 2.2), xmax = c("Non-pneumonia control", 1.2),
+              annotation = c("1.96e-02"), 
+              tip_length = 0.01,
+              textsize = 4) +
+  
+  geom_signif(y_position = c(110), 
+              xmin = c("Other pneumonia", 2.2), xmax = c("Other viral pneumonia", 4.2),
+              annotation = c("5.51e-03"), 
+              tip_length = 0.01,
+              textsize = 4) 
+ct1
+
+# Save PDF
+ggsave(ct1, filename = "ct1.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## CD4 T cells
+
+kruskal.test(`CD4 T cells` ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 50.67, df = 3, p-value = 5.751e-11
+
+stats_cd4 = pairwise.wilcox.test(facs_endpts$`CD4 T cells`, 
+                                 facs_endpts$pna_type_verified, 
+                                 p.adjust.method = "fdr") %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+# Plot
+ct2 <- ggplot(facs_endpts, aes(y=`CD4 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 25)) +
+  labs(title="CD4+ T cells", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct2
+
+ct2 <- ct2 + geom_signif(y_position=c(70, 70),
+                 xmin = c("COVID-19", 3.2), xmax = c("Other pneumonia", 2.2),
+                 annotations = c("7.44e-11"),
+                 tip_length = 0.01,
+                 textsize = 4) +
+  
+  geom_signif(y_position = c(70), 
+              xmin = c("COVID-19", 3.2), xmax = c("Other viral pneumonia", 4.2),
+              annotation = c("4.42e-03"), 
+              tip_length = 0.01,
+              textsize = 4) +
+  
+  geom_signif(y_position = c(80), 
+              xmin = c("Other pneumonia", 2.2), xmax = c("Non-pneumonia control", 1.2),
+              annotation = c("3.24e-02"), 
+              tip_length = 0.01,
+              textsize = 4) 
+
+ct2
+# Save PDF
+ggsave(ct2, filename = "ct2.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## CD8 T cells
+
+kruskal.test(`CD8 T cells` ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 59.459, df = 3, p-value = 7.671e-13
+
+stats_cd8 = pairwise.wilcox.test(facs_endpts$`CD8 T cells`, 
+                                 facs_endpts$pna_type_verified, 
+                                 p.adjust.method = "fdr") %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+
+# Plot
+ct3 <- ggplot(facs_endpts, aes(y=`CD8 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 25)) +
+  labs(title="CD8+ T cells", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct3
+
+ct3 <- ct3 + geom_signif(y_position=c(70, 70),
+                  xmin = c("COVID-19", 3.2), xmax = c("Other pneumonia", 2.2),
+                  annotations = c("2.81e-13"),
+                  tip_length = 0.01,
+                  textsize = 4) +
+  
+          geom_signif(y_position = c(80), 
+              xmin = c("COVID-19", 3.2), xmax = c("Non-pneumonia control", 1.2),
+              annotation = c("2.04e-02"), 
+              tip_length = 0.01,
+              textsize = 4) +
+  
+          geom_signif(y_position = c(90), 
+              xmin = c("Other pneumonia", 2.2), xmax = c("Non-pneumonia control", 1.2),
+              annotation = c("1.16e-02"), 
+              tip_length = 0.01,
+              textsize = 4) +
+
+          geom_signif(y_position = c(90), 
+              xmin = c("Other pneumonia", 2.2), xmax = c("Other viral pneumonia", 4.2),
+              annotation = c("7.22e-05"), 
+              tip_length = 0.01,
+              textsize = 4) 
+
+ct3
+
+# Save PDF
+ggsave(ct3, filename = "ct3.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+## Treg cells
+
+kruskal.test(`Treg cells` ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 107.52, df = 3, p-value < 2.2e-16
+
+stats_tregs = pairwise.wilcox.test(facs_endpts$`Treg cells`, 
+                                 facs_endpts$pna_type_verified, 
+                                 p.adjust.method = "fdr")  %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+
+# Plot
+ct4 <- ggplot(facs_endpts, aes(y=`Treg cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 1.5), breaks = seq(0, 20, by = 5)) +
+  labs(title="Treg cells", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct4
+
+ct4 <- ct4 + geom_signif(y_position=c(15, 15),
+                  xmin = c("COVID-19", 3.2), xmax = c("Other viral pneumonia", 4.2),
+                  annotations = c("7.31e-12"),
+                  tip_length = 0.01,
+                  textsize = 4) +
+  
+  geom_signif(y_position = c(15), 
+              xmin = c("COVID-19", 3.2), xmax = c("Other pneumonia", 2.2),
+              annotation = c("4.87e-19"), 
+              tip_length = 0.01,
+              textsize = 4) +
+  
+  geom_signif(y_position = c(16.5), 
+              xmin = c("COVID-19", 3.2), xmax = c("Non-pneumonia control", 1.2),
+              annotation = c("2.49e-03"), 
+              tip_length = 0.01,
+              textsize = 4) +
+
+  geom_signif(y_position = c(18), 
+              xmin = c("Non-pneumonia control", 1.2), xmax = c("Other pneumonia", 2.2),
+              annotation = c("7.15e-03"), 
+              tip_length = 0.01,
+              textsize = 4) +
+  
+  geom_signif(y_position = c(19.5), 
+              xmin = c("Non-pneumonia control", 1.2), xmax = c("Other viral pneumonia", 2.2),
+              annotation = c("1.09e-03"), 
+              tip_length = 0.01,
+              textsize = 4)
+
+ct4
+
+# Save PDF
+ggsave(ct4, filename = "ct4.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+```
+
+```{r}
+# Patch
+layout <- "AB
+           CD"
+ct_tot <- ct1 + ct2 + ct3 + ct4 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+ct_tot
+
+# Save PDF
+ggsave(ct_tot, filename = "ct_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 8, units = "in")
+```
+
+```{r}
+## Monocytes
+
+kruskal.test(Monocytes ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 59.459, df = 3, p-value = 7.671e-13
+
+stats_mono = pairwise.wilcox.test(facs_endpts$Monocytes, 
+                                 facs_endpts$pna_type_verified, 
+                                 p.adjust.method = "fdr") %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+
+# Plot
+ct5 <- ggplot(facs_endpts, aes(y = Monocytes, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 25)) +
+  labs(title="Monocytes", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct5
+
+ct5 <-  ct5 + geom_signif(y_position=c(60, 60),
+                  xmin = c("COVID-19", 3.2), xmax = c("Non-pneumonia control", 1.2),
+                  annotations = c("4.07e-03"),
+                  tip_length = 0.01,
+                  textsize = 4) +
+  
+  geom_signif(y_position = c(65), 
+              xmin = c("COVID-19", 3.2), xmax = c("Other pneumonia", 2.2),
+              annotation = c("1.08e-02"), 
+              tip_length = 0.01,
+              textsize = 4)
+
+ct5
+
+# Save PDF
+ggsave(ct5, filename = "ct5.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## Macrophages
+
+kruskal.test(`Macrophages` ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 59.459, df = 3, p-value = 7.671e-13
+
+stats_macs = pairwise.wilcox.test(facs_endpts$Macrophages, 
+                                 facs_endpts$pna_type_verified, 
+                                 p.adjust.method = "fdr") %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+
+# Plot
+ct6 <- ggplot(facs_endpts, aes(y = Macrophages, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 25)) +
+  labs(title="Macrophages", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct6
+
+ct6 <-  ct6 + geom_signif(y_position=c(105, 105),
+                  xmin = c("Non-pneumonia control", 1.2), xmax = c("Other pneumonia", 2.2),
+                  annotations = c("8.88e-03"),
+                  tip_length = 0.01,
+                  textsize = 4) +
+  
+  geom_signif(y_position = c(110), 
+              xmin = c("Non-pneumonia control", 1.2), xmax = c("COVID-19", 3.2),
+              annotation = c("8.88e-03"), 
+              tip_length = 0.01,
+              textsize = 4)
+
+ct6
+
+# Save PDF
+ggsave(ct6, filename = "ct6.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## Neutrophils
+
+kruskal.test(`Neutrophils` ~ pna_type_verified, data = facs_endpts) 
+# Kruskal-Wallis chi-squared = 59.459, df = 3, p-value = 7.671e-13
+
+stats_neuts = pairwise.wilcox.test(facs_endpts$Neutrophils, 
+                                 facs_endpts$pna_type_verified, 
+                                 p.adjust.method = "fdr") %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                group = rownames(.),
+                yval = seq(from = 1.05, by = 0.05, length.out = n()))
+
+
+# Plot
+ct7 <- ggplot(facs_endpts, aes(y = Neutrophils, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Diagnosis), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.8)) +
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=15, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  ylim(c(0, 100)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 25)) +
+  labs(title="Neutrophils", 
+       subtitle="",
+       x=" ",
+       y="Percent of total cells")
+
+ct7
+
+ct7 <-  ct7 + geom_signif(y_position=c(105, 105),
+                  xmin = c("COVID-19", 3.2), xmax = c("Other pneumonia", 2.2),
+                  annotations = c("5.65e-03"),
+                  tip_length = 0.01,
+                  textsize = 4) +
+  
+  geom_signif(y_position=c(110),
+                  xmin = c("Other pneumonia", 2.2), xmax = c("Other viral pneumonia", 4.2),
+                  annotations = c("4.12e-02"),
+                  tip_length = 0.01,
+                  textsize = 4) +
+  
+  geom_signif(y_position = c(105), 
+              xmin = c("Non-pneumonia control", 1.2), xmax = c("Other pneumonia", 2.2),
+              annotation = c("5.94e-03"), 
+              tip_length = 0.01,
+              textsize = 4)
+ct7
+
+# Save PDF
+ggsave(ct7, filename = "ct7.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## Quantify alveolar immune cell subset abundance by pna category and timing of BAL (ALL samples from cohort)
+# Great stats code provided by Rogan
+
+facs_endpts_dayett <- facs_endpts %>% 
+  dplyr::mutate(dayETT = ifelse(day_of_intubation <= 2, "≤ 48hrs", "> 48hrs"))
+
+# Arrange order
+facs_endpts_dayett$Diagnosis <- factor(facs_endpts_dayett$pna_type_verified, 
+                                       levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+facs_endpts_dayett$Outcome <- factor(facs_endpts_dayett$Outcome, 
+                                     levels = c("Discharged", "Deceased"))
+
+facs_endpts_dayett$dayETT <- factor(facs_endpts_dayett$dayETT, 
+                                     levels = c("≤ 48hrs", "> 48hrs"))
+
+## CD3 T cells                                  
+# Very nice stats code to facilitate annotations thanks to Rogan
+cd3_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+cd3_dayett_stats = pairwise.wilcox.test(cd3_dayett_stats$`CD3 T cells`,
+                                        cd3_dayett_stats$combined, 
+                                 p.adjust.method = "none",
+                                 exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd3_dayett_stats <- cd3_dayett_stats[c(1, 5, 7, 3, 13, 12), ] 
+
+cd3_dayett_stats <- cd3_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 110, by = 8, length.out = nrow(.)))
+   
+
+# Plot
+ cd1 <- ggplot(facs_endpts_dayett, aes(y=`CD3 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd3_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  ylim(c(0, 100)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_y_continuous(expand = expansion(add = 10), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD3^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+ cd1
+
+ # Save PDF
+ggsave(cd1, filename = "cd1.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## Monocytes
+mono_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+mono_dayett_stats = pairwise.wilcox.test(mono_dayett_stats$`Monocytes`,
+                                         mono_dayett_stats$combined, 
+                                         p.adjust.method = "none",
+                                         exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+mono_dayett_stats <- mono_dayett_stats[c(1,7,5,3,13,9,8), ] 
+
+mono_dayett_stats <- mono_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 4, length.out = nrow(.)))
+
+# Plot
+cd2 <- ggplot(facs_endpts_dayett, aes(y=`Monocytes`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = mono_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  # ylim(c(0, 100)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Monocytes", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+cd2
+
+ # Save PDF
+ggsave(cd2, filename = "cd2.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AB"
+cd_tot <- cd1 + cd2 + 
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+cd_tot
+
+# Save PDF
+ggsave(cd_tot, filename = "cd_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+```{r}
+## CD4 T cells
+cd4_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+cd4_dayett_stats = pairwise.wilcox.test(cd4_dayett_stats$`CD4 T cells`,
+                                        cd4_dayett_stats$combined, 
+                                        p.adjust.method = "none",
+                                        exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd4_dayett_stats <- cd4_dayett_stats[c(1, 5, 7, 3, 13, 12), ] 
+
+cd4_dayett_stats <- cd4_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 5, length.out = nrow(.)))
+
+
+# Plot
+cd3 <- ggplot(facs_endpts_dayett, aes(y=`CD4 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd4_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  ylim(c(0, 100)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD4^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+cd3
+
+ # Save PDF
+ggsave(cd3, filename = "cd3.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+
+## CD8 T cells
+cd8_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+cd8_dayett_stats = pairwise.wilcox.test(cd8_dayett_stats$`CD8 T cells`,
+                                        cd8_dayett_stats$combined, 
+                                        p.adjust.method = "none",
+                                        exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd8_dayett_stats <- cd8_dayett_stats[c(1, 7, 5 ,3, 13, 12), ]  
+
+cd8_dayett_stats <- cd8_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 5, length.out = nrow(.)))
+
+# Plot
+cd4 <- ggplot(facs_endpts_dayett, aes(y=`CD8 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd8_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  ylim(c(0, 100)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD8^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+cd4
+
+ # Save PDF
+ggsave(cd4, filename = "cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## Treg cells
+tregs_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+tregs_dayett_stats = pairwise.wilcox.test(tregs_dayett_stats$`Treg cells`,
+                                        tregs_dayett_stats$combined, 
+                                        p.adjust.method = "none",
+                                        exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+tregs_dayett_stats <- tregs_dayett_stats[c(1, 7, 5 ,3, 13, 10, 14), ] 
+
+tregs_dayett_stats <- tregs_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 15, by = 2, length.out = nrow(.)))
+
+# Plot
+cd5 <- ggplot(facs_endpts_dayett, aes(y=`Treg cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = tregs_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  ylim(c(0, 100)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_y_continuous(expand = expansion(add = 1.5), breaks = seq(0, 15, by = 5)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Treg cells", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+cd5
+
+ # Save PDF
+ggsave(cd5, filename = "cd5.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC"
+
+cd2_tot <- cd3 + cd4 + cd5 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+cd2_tot
+
+# Save PDF
+ggsave(cd2_tot, filename = "cd2_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 16, height = 8, units = "in")
+```
+
+
+```{r}
+## Neutrophils
+neuts_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+neuts_dayett_stats = pairwise.wilcox.test(neuts_dayett_stats$`Neutrophils`,
+                                          neuts_dayett_stats$combined, 
+                                          p.adjust.method = "none",
+                                          exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+neuts_dayett_stats <- neuts_dayett_stats[c(1, 7, 8), ] 
+
+neuts_dayett_stats <- neuts_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 5, length.out = nrow(.)))
+
+# Plot
+cd6 <- ggplot(facs_endpts_dayett, aes(y=`Neutrophils`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = neuts_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Neutrophils", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+cd6
+
+ # Save PDF
+ggsave(cd6, filename = "cd6.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+## Macrophages
+macs_dayett_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, sep = ", ")))
+
+macs_dayett_stats = pairwise.wilcox.test(macs_dayett_stats$`Macrophages`,
+                                         macs_dayett_stats$combined, 
+                                          p.adjust.method = "none",
+                                          exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("≤", group1) ~ xmin - 0.2,
+                                 grepl(">", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("≤", group2) ~ xmax - 0.2,
+                                 grepl(">", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+macs_dayett_stats <- macs_dayett_stats[8, ] 
+
+macs_dayett_stats <- macs_dayett_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 10, length.out = nrow(.)))
+
+# Plot
+cd7 <- ggplot(facs_endpts_dayett, aes(y=`Macrophages`, x=Diagnosis)) +
+  geom_boxplot(aes(fill = Diagnosis, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Diagnosis, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.35)) +
+  # geom_jitter(size = 0.5, width = 0.25) +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = macs_dayett_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Macrophages", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+cd7
+
+ # Save PDF
+ggsave(cd7, filename = "cd7.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in") 
+```
+
+```{r}
+## Correlation plot for immune cells during course of disease
+# Get study ID
+facs_endpts_cor <- facs_endpts %>% 
+  dplyr:: mutate(study_id = substr(facs_endpts$tc_pt_study_id, 1,4)) 
+
+# Factor
+facs_endpts_cor$Diagnosis <- factor(facs_endpts_cor$pna_type_verified, 
+                                                        levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+facs_endpts_cor$Outcome <- factor(facs_endpts_cor$Outcome, 
+                                              levels = c("Discharged", "Deceased"))
+
+facs_endpts_cor$"Infection status" <- factor(facs_endpts_cor$Superinfection_verified,
+                                    levels = c("Primary Only", "Superinfection", "VAP"))
+
+# Remove samples with infinite values for correlation analysis (2 samples with Inf values removed)
+facs_endpts_cor <- facs_endpts_cor %>% 
+  filter(day_of_intubation != "Inf")
+```
+
+```{r}
+# Plot CD3 T cells
+cor <- ggplot(facs_endpts_cor, 
+               aes(x = day_of_intubation, 
+                   y = `CD3 T cells`)) + 
+  geom_point(aes(color = Diagnosis, shape = Outcome, alpha = 0.1)) + 
+  scale_color_manual(values =
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  guides(shape = guide_legend(override.aes = list(size=4))) +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(aes(color = Diagnosis),
+              method = "lm",
+              se = F,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 1.5) +
+  stat_cor(aes(color = Diagnosis),
+           method = "pearson",
+           p.digits = 1,
+           label.y = c(95, 90, 85, 80),
+           label.x = c(65)) +
+  scale_color_manual(values = 
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  # ylim(c(0, 100)) +
+  # xlim(c(0, 100)) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(subtitle="",
+       y="Percent of total cells", 
+       x="Days from intubation", 
+       title=bquote(CD3^'+'~T~ cells)) 
+
+cor
+
+cor1 <- cor + guides(alpha = "none")
+cor1
+
+# Save PDF
+ggsave(cor1, filename = "cor1.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# Plot Monocytes 
+cor <- ggplot(facs_endpts_cor, 
+               aes(x = day_of_intubation, 
+                   y = `Monocytes`)) + 
+  geom_point(aes(color = Diagnosis, shape = Outcome, alpha = 0.1)) + 
+  scale_color_manual(values =
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  guides(shape = guide_legend(override.aes = list(size=4))) +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(aes(color = Diagnosis),
+              method = "lm",
+              se = F,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 1.5) +
+  stat_cor(aes(color = Diagnosis),
+           method = "pearson",
+           digits = 1,
+           label.y = c(70, 65, 60, 55),
+           label.x = c(65)) +
+  scale_color_manual(values = 
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  # ylim(c(0, 100)) +
+  # xlim(c(0, 100)) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(subtitle="",
+       y="Percent of total cells", 
+       x="Days from intubation", 
+       title="Monocytes") 
+
+cor
+
+cor2 <- cor + guides(alpha = "none")
+cor2
+
+# Save as PDF
+ggsave(cor2, filename = "cor2.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+```{r}
+# Patch
+layout <- "AB"
+
+cd3_tot <- cd2 + cor2 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+cd3_tot
+
+# Save PDF
+ggsave(cd3_tot, filename = "cd3_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+```{r}
+# Plot Neutrophils
+cor <- ggplot(facs_endpts_cor, 
+               aes(x = day_of_intubation, 
+                   y = `Neutrophils`)) + 
+  geom_point(aes(color = Diagnosis, shape = Outcome, alpha = 0.1)) + 
+  scale_color_manual(values =
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  guides(shape = guide_legend(override.aes = list(size=4))) +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(aes(color = Diagnosis),
+              method = "lm",
+              se = F,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 1.5) +
+  stat_cor(aes(color = Diagnosis),
+           method = "pearson",
+           p.digits = 1,
+           label.y = c(115, 110, 105, 100),
+           label.x = c(50)) +
+  scale_color_manual(values = 
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  ylim(c(0, 100)) +
+  # xlim(c(0, 100)) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  labs(subtitle="",
+       y="Percent of total cells", 
+       x="Days from intubation", 
+       title="Neutrophils") 
+
+cor
+
+cor3 <- cor + guides(alpha = "none")
+cor3
+
+# Save as PDF
+ggsave(cor3, filename = "cor3.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+```
+```{r}
+# Plot Macrophages
+cor <- ggplot(facs_endpts_cor, 
+               aes(x = day_of_intubation, 
+                   y = Macrophages)) + 
+  geom_point(aes(color = Diagnosis, shape = Outcome, alpha = 0.1)) + 
+  scale_color_manual(values =
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  guides(shape = guide_legend(override.aes = list(size=4))) +
+  new_scale_color() +
+  theme_bw() +
+  geom_smooth(aes(color = Diagnosis),
+              method = "lm",
+              se = F,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 1.5) +
+  stat_cor(aes(color = Diagnosis),
+           method = "pearson",
+           label.y = c(115, 110, 105, 100),
+           label.x = c(60)) +
+  scale_color_manual(values = 
+                       c("Non-pneumonia control" = pna_pal[2],
+                         "Other pneumonia" = pna_pal[3],
+                         "COVID-19" = pna_pal[1],
+                         "Other viral pneumonia" = pna_pal[4])) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  labs(subtitle="",
+       y="Percent of total cells", 
+       x="Days from intubation", 
+       title="Macrophages") 
+
+cor
+
+cor4 <- cor + guides(alpha = "none")
+cor4
+
+# # Save as PDF
+ggsave(cor4, filename = "cor4.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AB"
+
+cd4_tot <- cd6 + cor3 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+cd4_tot
+
+# Save PDF
+ggsave(cd4_tot, filename = "cd4_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AB"
+
+cd5_tot <- cd7 + cor4 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+cd5_tot
+
+# Save PDF
+ggsave(cd5_tot, filename = "cd5_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+
+```{r}
+## Let's evaluate whether Neutrophil cell abundance increases with superinfection/VAP. Replicate Rogan's Circuits Extended fig 4
+# Filter COVID-19 samples only
+facs_endpts_dayett_covid <- facs_endpts_dayett %>% 
+  filter(pna_type_verified == "COVID-19")
+  
+# Remove row with NA from sample KK-BAL-14
+facs_endpts_dayett_covid <- facs_endpts_dayett_covid %>% 
+  dplyr::filter(tc_pt_study_id != "KK-BAL-14")
+
+
+# Group data by Infection status
+facs_endpts_dayett_covid <- facs_endpts_dayett_covid %>% 
+  dplyr::mutate(Infection_status = 
+                  case_when(stri_detect_fixed(Superinfection_verified, "Primary Only") ~ "COVID-19 Only",
+                            stri_detect_fixed(Superinfection_verified, "Superinfection") ~ "COVID-19 with bacterial superinfection",
+                            stri_detect_fixed(Superinfection_verified, "VAP") ~ "COVID-19 with bacterial superinfection",
+                            TRUE ~ "Default"))
+
+# Group data by Timing of BAL relative to intubation
+facs_endpts_dayett_covid <- facs_endpts_dayett_covid %>% 
+  dplyr::mutate(Sampling_time = 
+                  case_when(stri_detect_fixed(dayETT, "≤ 48hrs") ~ "Early",
+                            stri_detect_fixed(dayETT, "> 48hrs") ~ "Late",
+                            TRUE ~ "Default"))
+
+# Factor 
+facs_endpts_dayett_covid$Sampling_time <- factor(facs_endpts_dayett_covid$Sampling_time,
+                                                 levels = c("Early", "Late"))
+
+facs_endpts_dayett_covid$Infection_status <- factor(facs_endpts_dayett_covid$Infection_status,
+                                                    levels = c("COVID-19 Only", "COVID-19 with bacterial superinfection"))
+
+
+# CD3 T cells
+cd3_dayett_covid_stats = facs_endpts_dayett_covid %>% 
+  mutate(combined = factor(paste(Sampling_time, Infection_status, sep = ", ")))
+
+cd3_dayett_covid_stats = pairwise.wilcox.test(cd3_dayett_covid_stats$`CD3 T cells`,
+                                              cd3_dayett_covid_stats$combined, 
+                                              p.adjust.method = "none",
+                                              exact = T) %>% 
+  tidy() %>% 
+  # dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+  #                 substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Early", group1) ~ 1,
+                                 grepl("Late", group1) ~ 2),
+                xmax = case_when(grepl("Early", group2) ~ 1,
+                                 grepl("Late", group2) ~ 2),
+                # Add jitter for day
+                xmin = case_when(grepl("COVID-19 Only", group1) ~ xmin - 0.2,
+                                 grepl("COVID-19 with bacterial superinfection", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("COVID-19 Only", group2) ~ xmax - 0.2,
+                                 grepl("COVID-19 with bacterial superinfection", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd3_dayett_covid_stats <- cd3_dayett_covid_stats[c(4, 6), ] 
+
+cd3_dayett_covid_stats <- cd3_dayett_covid_stats %>% 
+  dplyr::mutate(yval = seq(from = 100, by = 5, length.out = nrow(.)))
+
+# Plot
+is <- ggplot(facs_endpts_dayett_covid, aes(y = `CD3 T cells`, x = Sampling_time)) +
+  geom_boxplot(aes(fill=Infection_status), outlier.shape = NA) + 
+  geom_point(aes(fill = Infection_status), position = position_jitterdodge(jitter.width = 0.35)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("COVID-19 Only" = "#BC3C29FF",
+                        "COVID-19 with bacterial superinfection" = "#BC3C2999")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F, 
+              data = cd3_dayett_covid_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  labs(title=bquote(CD3^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+is
+is1 <- is + labs(fill = "Infection status")
+is1
+
+# Save PDF
+ggsave(is1, filename = "is1.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Neutrophils
+neuts_dayett_covid_stats = facs_endpts_dayett_covid %>% 
+  mutate(combined = factor(paste(Sampling_time, Infection_status, sep = ", ")))
+
+neuts_dayett_covid_stats = pairwise.wilcox.test(neuts_dayett_covid_stats$`Neutrophils`,
+                                              neuts_dayett_covid_stats$combined, 
+                                              p.adjust.method = "none",
+                                              exact = T) %>% 
+  tidy() %>% 
+  # dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+  #                 substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Early", group1) ~ 1,
+                                 grepl("Late", group1) ~ 2),
+                xmax = case_when(grepl("Early", group2) ~ 1,
+                                 grepl("Late", group2) ~ 2),
+                # Add jitter for day
+                xmin = case_when(grepl("COVID-19 Only", group1) ~ xmin - 0.2,
+                                 grepl("COVID-19 with bacterial superinfection", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("COVID-19 Only", group2) ~ xmax - 0.2,
+                                 grepl("COVID-19 with bacterial superinfection", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+neuts_dayett_covid_stats <- neuts_dayett_covid_stats[c(2,4,6), ] 
+
+neuts_dayett_covid_stats <- neuts_dayett_covid_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 5, length.out = nrow(.)))
+
+# Plot
+is <- ggplot(facs_endpts_dayett_covid, aes(y = `Neutrophils`, x = Sampling_time)) +
+  geom_boxplot(aes(fill = Infection_status), outlier.shape = NA) + 
+  geom_point(aes(fill = Infection_status), position = position_jitterdodge(jitter.width = 0.35)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("COVID-19 Only" = "#CD534CFF",
+                        "COVID-19 with bacterial superinfection" = "#CD534C99")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F, 
+              data = neuts_dayett_covid_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  labs(title="Neutrophils", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+is
+is2 <- is + labs(fill = "Infection status")
+is2
+
+# Save PDF
+ggsave(is2, filename = "is2.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AB"
+
+cd4_tot <- cd6 + cor3 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+cd4_tot
+
+# Save PDF
+ggsave(cd4_tot, filename = "cd4_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AB"
+
+is_tot <- is1 + is2 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+is_tot
+
+# Save PDF
+ggsave(is_tot, filename = "is_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+```{r}
+## Let's explore immune cell subset abundance by binary outcome  
+# Factor
+facs_endpts$Outcome <- factor(facs_endpts$Outcome,
+                                 levels = c("Discharged", "Deceased"))
+
+facs_endpts$Diagnosis <- factor(facs_endpts$pna_type_verified,
+                              levels = c("Non-pneumonia control", 
+                                         "Other pneumonia", 
+                                         "COVID-19", 
+                                         "Other viral pneumonia"))
+
+# Plot CD3 T cells
+cd3_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(Diagnosis, Outcome, sep = ", ")))
+
+cd3_outcome_stats = pairwise.wilcox.test(cd3_outcome_stats$`CD3 T cells`,
+                                         cd3_outcome_stats$combined, 
+                                         p.adjust.method = "none",
+                                         exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd3_outcome_stats <- cd3_outcome_stats[c(1,7,13,3),  ] 
+cd3_outcome_stats <- cd3_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 6, length.out = nrow(.)))
+
+# PLot
+out1 <- ggplot(facs_endpts, aes(y=`CD3 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd3_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD3^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+out1
+
+# Save PDF
+ggsave(out1, filename = "out1.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+```
+
+
+```{r}
+# CD4 T cells
+cd4_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(pna_type_verified, Outcome, sep = ", ")))
+
+cd4_outcome_stats = pairwise.wilcox.test(cd4_outcome_stats$`CD4 T cells`,
+                                         cd4_outcome_stats$combined, 
+                                         p.adjust.method = "none",
+                                         exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd4_outcome_stats <- cd4_outcome_stats[c(1,7,13,3),  ] 
+
+cd4_outcome_stats <- cd4_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 6, length.out = nrow(.)))
+
+
+# PLot
+out2 <- ggplot(facs_endpts, aes(y=`CD4 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd4_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD4^'+'~T~ cells), # CD4+ T cells
+       subtitle="",
+       x="",
+       y="Percent of total cells") # Percent of total cells
+
+out2
+
+# Save PDF
+ggsave(out2, filename = "out2.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+```
+
+
+```{r}
+# CD8 T cells
+cd8_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(pna_type_verified, Outcome, sep = ", ")))
+
+cd8_outcome_stats = pairwise.wilcox.test(cd8_outcome_stats$`CD8 T cells`,
+                                         cd8_outcome_stats$combined, 
+                                         p.adjust.method = "none",
+                                         exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+cd8_outcome_stats <- cd8_outcome_stats[c(1,7,13,3,8,5,12,15),  ] 
+
+cd8_outcome_stats <- cd8_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 6, length.out = nrow(.)))
+
+# PLot
+out3 <- ggplot(facs_endpts, aes(y=`CD8 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd8_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD8^'+'~T~ cells), # CD8+ T cells
+       subtitle="",
+       x="",
+       y="Percent of total cells") # Percent of total cells
+
+out3
+
+# Save PDF
+ggsave(out3, filename = "out3.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# Treg cells
+tregs_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(pna_type_verified, Outcome, sep = ", ")))
+
+tregs_outcome_stats = pairwise.wilcox.test(tregs_outcome_stats$`Treg cells`,
+                                           tregs_outcome_stats$combined, 
+                                         p.adjust.method = "none",
+                                         exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+tregs_outcome_stats <- tregs_outcome_stats[c(1,7,13,3,8,5,10,14),  ] 
+
+tregs_outcome_stats <- tregs_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 15, by = 2, length.out = nrow(.)))
+
+
+# PLot
+out4 <- ggplot(facs_endpts, aes(y=`Treg cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = tregs_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 1.5), breaks = seq(0, 15, by = 5)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Treg cells", # Treg cells
+       subtitle="",
+       x="",
+       y="Percent of total cells") # Percent of total cells
+
+out4
+
+# Save PDF
+ggsave(out4, filename = "out4.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AAA
+           BCD"
+
+out_tot <- out1 + out2 + out3 + out4 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+out_tot
+
+# Save PDF
+ggsave(out_tot, filename = "out_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 20, height = 12, units = "in")
+```
+
+```{r}
+# Neutrophils
+neuts_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(pna_type_verified, Outcome, sep = ", ")))
+
+neuts_outcome_stats = pairwise.wilcox.test(neuts_outcome_stats$`Neutrophils`,
+                                           neuts_outcome_stats$combined, 
+                                           p.adjust.method = "none",
+                                           exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+neuts_outcome_stats <- neuts_outcome_stats[c(1,7,10,8,12),  ] 
+
+neuts_outcome_stats <- neuts_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 7, length.out = nrow(.)))
+
+# Plot
+out5 <- ggplot(facs_endpts, aes(y=`Neutrophils`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = neuts_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Neutrophils", # 
+       subtitle="",
+       x="",
+       y="Percent of total cells") # Percent of total cells
+
+out5
+
+# Save PDF
+ggsave(out5, filename = "out5.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+```
+
+
+```{r}
+# Macrophages
+macs_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(pna_type_verified, Outcome, sep = ", ")))
+
+macs_outcome_stats = pairwise.wilcox.test(macs_outcome_stats$`Macrophages`,
+                                          macs_outcome_stats$combined, 
+                                           p.adjust.method = "none",
+                                           exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot
+macs_outcome_stats <- macs_outcome_stats[c(1),  ] 
+
+macs_outcome_stats <- macs_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 6, length.out = nrow(.)))
+
+
+# Plot
+out6 <- ggplot(facs_endpts, aes(y=`Macrophages`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = macs_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Macrophages", # 
+       subtitle="",
+       x="",
+       y="Percent of total cells") # Percent of total cells
+
+out6
+
+# Save PDF
+ggsave(out6, filename = "out6.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# Monocytes
+mono_outcome_stats = facs_endpts %>% 
+  mutate(combined = factor(paste(pna_type_verified, Outcome, sep = ", ")))
+
+VCV = pairwise.wilcox.test(mono_outcome_stats$`Monocytes`,
+                                          mono_outcome_stats$combined, 
+                                           p.adjust.method = "none",
+                                           exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) ~ xmin - 0.2,
+                                 grepl("Deceased", group1) ~ xmin + 0.2),
+                xmax = case_when(grepl("Discharged", group2) ~ xmax - 0.2,
+                                 grepl("Deceased", group2) ~ xmax + 0.2),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+# Subset comparisons for plot  
+mono_outcome_stats <- mono_outcome_stats[c(3), ] 
+
+mono_outcome_stats <- mono_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 5, length.out = nrow(.)))
+
+# Plot
+out7 <- ggplot(facs_endpts, aes(y=`Monocytes`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+   geom_signif(inherit.aes = F,
+               data = mono_outcome_stats,
+               aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+               tip_length = 0.01,
+               manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Monocytes", # 
+       subtitle="",
+       x="",
+       y="Percent of total cells") # Percent of total cells
+
+out7
+
+# Save PDF
+ggsave(out7, filename = "out7.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC
+           ###"
+
+out2_tot <- out5 + out6 + out7 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+out2_tot
+
+# Save PDF
+ggsave(out2_tot, filename = "out2_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 20, height = 8, units = "in")
+```
+
+
+```{r}
+## Let's explore immune cell subset abundance by binary outcome and timing from first intubation
+# Factor
+facs_endpts_dayett$Diagnosis <- factor(facs_endpts_dayett$pna_type_verified, 
+                                                        levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+facs_endpts_dayett$Outcome <- factor(facs_endpts_dayett$Outcome, 
+                                              levels = c("Discharged", "Deceased"))
+## CD3 T cells
+cd3_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+cd3_dayett_outcome_stats = pairwise.wilcox.test(cd3_dayett_outcome_stats$`CD3 T cells`,
+                                                cd3_dayett_outcome_stats$combined, 
+                                                p.adjust.method = "none",
+                                                exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+cd3_dayett_outcome_stats <- cd3_dayett_outcome_stats[c(4,1,19,26), ] 
+
+cd3_dayett_outcome_stats <- cd3_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 100, by = 6, length.out = nrow(.)))
+
+# Plot
+ outd1 <- ggplot(facs_endpts_dayett, aes(y=`CD3 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd3_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD3^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd1
+
+# Save PDF
+ggsave(outd1, filename = "outd1.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# CD4 T cells
+cd4_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+cd4_dayett_outcome_stats = pairwise.wilcox.test(cd4_dayett_outcome_stats$`CD4 T cells`,
+                                                cd4_dayett_outcome_stats$combined, 
+                                                p.adjust.method = "none",
+                                                exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+cd4_dayett_outcome_stats <- cd4_dayett_outcome_stats[c(1, 4, 26, 19), ] 
+
+cd4_dayett_outcome_stats <- cd4_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 6, length.out = nrow(.)))
+
+# Plot
+ outd2 <- ggplot(facs_endpts_dayett, aes(y=`CD4 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd4_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD4^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd2
+
+# Save PDF
+ggsave(outd2, filename = "outd2.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# CD8 T cells
+cd8_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+cd8_dayett_outcome_stats = pairwise.wilcox.test(cd8_dayett_outcome_stats$`CD8 T cells`,
+                                                cd8_dayett_outcome_stats$combined, 
+                                                p.adjust.method = "none",
+                                                exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+cd8_dayett_outcome_stats <- cd8_dayett_outcome_stats[c(1, 4, 26, 19,8, 13, 36, 33), ] 
+
+cd8_dayett_outcome_stats <- cd8_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 6, length.out = nrow(.)))
+
+
+# Plot
+ outd3 <- ggplot(facs_endpts_dayett, aes(y=`CD8 T cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = cd8_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title=bquote(CD8^'+'~T~ cells), 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd3
+
+# Save PDF
+ggsave(outd3, filename = "outd3.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# Treg cells
+treg_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+treg_dayett_outcome_stats = pairwise.wilcox.test(treg_dayett_outcome_stats$`Treg cells`,
+                                                treg_dayett_outcome_stats$combined, 
+                                                p.adjust.method = "none",
+                                                exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+treg_dayett_outcome_stats <- treg_dayett_outcome_stats[c(5,2,1,4,19,26,34,43,38,13,17,22,10), ] 
+
+treg_dayett_outcome_stats <- treg_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 15, by = 2, length.out = nrow(.)))
+
+# Plot
+ outd4 <- ggplot(facs_endpts_dayett, aes(y=`Treg cells`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = treg_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 1.5), breaks = seq(0, 15, by = 4)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Treg cells", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd4
+
+# Save PDF
+ggsave(outd4, filename = "outd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# Neutrophils
+neuts_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+neuts_dayett_outcome_stats = pairwise.wilcox.test(neuts_dayett_outcome_stats$`Neutrophils`,
+                                                  neuts_dayett_outcome_stats$combined, 
+                                                 p.adjust.method = "none",
+                                                 exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+neuts_dayett_outcome_stats <- neuts_dayett_outcome_stats[c(5,1,4,26,27,31,33), ] 
+
+neuts_dayett_outcome_stats <- neuts_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 105, by = 6, length.out = nrow(.)))
+
+# Plot
+ outd5 <- ggplot(facs_endpts_dayett, aes(y=`Neutrophils`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = neuts_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Neutrophils", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd5
+
+# Save PDF
+ggsave(outd5, filename = "outd5.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+
+```
+
+```{r}
+# Macrophages
+macs_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+macs_dayett_outcome_stats = pairwise.wilcox.test(macs_dayett_outcome_stats$`Macrophages`,
+                                                  macs_dayett_outcome_stats$combined, 
+                                                  p.adjust.method = "none",
+                                                  exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot 
+macs_dayett_outcome_stats <- macs_dayett_outcome_stats[c(4,1,27), ] 
+macs_dayett_outcome_stats <- macs_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 100, by = 10, length.out = nrow(.)))
+
+# Plot
+ outd6 <- ggplot(facs_endpts_dayett, aes(y=`Macrophages`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+     geom_signif(inherit.aes = F,
+              data = macs_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 100, by = 25)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Macrophages", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd6
+
+# Save PDF
+ggsave(outd6, filename = "outd6.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Monocytes
+mono_dayett_outcome_stats = facs_endpts_dayett %>% 
+  mutate(combined = factor(paste(Diagnosis, dayETT, Outcome, sep = ", ")))
+
+mono_dayett_outcome_stats = pairwise.wilcox.test(mono_dayett_outcome_stats$`Monocytes`,
+                                                 mono_dayett_outcome_stats$combined, 
+                                                 p.adjust.method = "none",
+                                                 exact = T) %>% 
+  tidy() %>% 
+  dplyr::filter(substring(group1, 1, regexpr("\\,", group1) - 1) == substring(group2, 1, regexpr("\\,", group2) - 1) |
+                  substring(group1, regexpr("\\,", group1) + 1) == substring(group2, regexpr("\\,", group2) + 1)) %>% 
+  dplyr::mutate(padj = p.adjust(p.value, method = "fdr"),
+                xmin = case_when(grepl("Non-pneumonia control", group1) ~ 1,
+                                 grepl("Other pneumonia", group1) ~ 2,
+                                 grepl("COVID-19", group1) ~ 3,
+                                 grepl("Other viral pneumonia", group1) ~ 4),
+                xmax = case_when(grepl("Non-pneumonia control", group2) ~ 1,
+                                 grepl("Other pneumonia", group2) ~ 2,
+                                 grepl("COVID-19", group2) ~ 3,
+                                 grepl("Other viral pneumonia", group2) ~ 4),
+                # Add jitter for day
+                xmin = case_when(grepl("Discharged", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin - 0.3,
+                                 grepl("Discharged", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin - 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("≤ 48hrs", group1) ~ xmin + 0.15,
+                                 grepl("Deceased", group1) & 
+                                   grepl("> 48hrs", group1) ~ xmin + 0.3),
+                xmax = case_when(grepl("Discharged", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax - 0.3,
+                                 grepl("Discharged", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax - 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("≤ 48hrs", group2) ~ xmax + 0.15,
+                                 grepl("Deceased", group2) & 
+                                   grepl("> 48hrs", group2) ~ xmax + 0.3),
+                yval = seq(from = 90, by = 10, length.out = nrow(.)),
+                annot =  format(padj, digits = 3, scientific = T),
+                group = rownames(.))
+
+
+# Subset comparisons for plot
+mono_dayett_outcome_stats <- mono_dayett_outcome_stats[c(5,4,26,13,43,29), ] 
+
+mono_dayett_outcome_stats <- mono_dayett_outcome_stats %>% 
+  dplyr::mutate(yval = seq(from = 60, by = 6, length.out = nrow(.)))
+
+
+# Plot
+ outd7 <- ggplot(facs_endpts_dayett, aes(y=`Monocytes`, x=Diagnosis)) +
+  geom_boxplot(aes(fill=Outcome, alpha=dayETT), outlier.shape = NA) + 
+  geom_point(aes(fill = Outcome, alpha=dayETT), position = position_jitterdodge(jitter.width = 0.15)) +
+  theme_bw(base_family = "Arial") +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+scale_alpha_manual(values = c("≤ 48hrs" = 1, "> 48hrs" = 0.4)) +
+  guides(alpha=guide_legend(override.aes=list(fill=hcl(c(15,195),100,0,alpha=c(1,0.4)),
+                                              colour=NA), nrow = 2, title = "Timing of BAL relative to intubation")) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  geom_signif(inherit.aes = F,
+              data = mono_dayett_outcome_stats,
+              aes(xmin = xmin, xmax = xmax, annotations = annot, y_position = yval, group = group),
+              tip_length = 0.01,
+              manual=TRUE) +
+  scale_y_continuous(expand = expansion(add = 5), breaks = seq(0, 60, by = 20)) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  labs(title="Monocytes", 
+       subtitle="",
+       x="",
+       y="Percent of total cells")
+
+outd7
+
+# Save PDF
+ggsave(outd7, filename = "outd7.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AAABBB
+           CCDDEE"
+outd1_tot <- outd1 + outd7 + outd2 + outd3 + outd4 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+outd1_tot
+
+# Save PDF
+ggsave(outd1_tot, filename = "outd1_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 20, height = 15, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AABB"
+outd2_tot <- outd5 + outd6 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = "right")
+
+outd2_tot
+
+# Save PDF
+ggsave(outd2_tot, filename = "outd2_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AAB"
+neuts_tot <- outd5 + is2 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = "right")
+
+neuts_tot
+
+# Save PDF
+ggsave(neuts_tot, filename = "neuts_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 7, units = "in")
+```
+
+
+
+```{r}
+## Let's find out whether Infection status of BAL samples correlate with binary outcome in COVID-19 pts
+# Counts for COVID samples
+facs_cov_infect_cts <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  group_by(Outcome, Superinfection_verified) %>% 
+  summarise(cts = n()) 
+
+# Transform to true NAs
+facs_cov_infect_cts$Superinfection_verified[is.na(facs_cov_infect_cts$Superinfection_verified)] = "NA"
+
+# Stats for COVID samples
+facs_cov_infect_cts_wide <- facs_cov_infect_cts %>%
+  pivot_wider(names_from =  "Outcome",
+              values_from = "cts")
+
+# Replace NAs with 0
+facs_cov_infect_cts_wide[is.na(facs_cov_infect_cts_wide)] <-  0
+
+# Make outcome into rownames
+facs_cov_infect_cts_wide  <- facs_cov_infect_cts_wide %>%
+  remove_rownames() %>%
+  column_to_rownames(var = "Superinfection_verified") %>% 
+  dplyr::select(Discharged, Deceased)
+
+# Fisher test
+facs_cov_infect_cts_stats <- row_wise_fisher_test(facs_cov_infect_cts_wide,
+                                                 p.adjust.method = "none")
+
+# Factor
+facs_cov_infect_cts$Outcome <- factor(facs_cov_infect_cts$Outcome,
+                                      levels = c("Discharged", "Deceased"))
+
+
+facs_cov_infect_cts$Infection_status <- factor(facs_cov_infect_cts$Superinfection_verified,
+                                    levels = c("Primary Only", "Superinfection", "VAP", "NA"))
+
+# Plot by total numbers
+c1 <- ggplot(facs_cov_infect_cts, aes(x = Outcome, y = cts, fill = Infection_status)) +
+  geom_bar(position = "fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values =  c("Primary Only" = infection_pal[6],
+                                "Superinfection" = infection_pal[5],
+                                "VAP" = infection_pal[10],
+                                "NA" = infection_pal[11])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="COVID-19 BAL samples", 
+       subtitle="",
+       x="",
+       y="Proportion")
+
+c1
+
+c1 <- c1 + labs(fill = "Infection status")
+  
+c1
+
+# Save PDF
+ggsave(c1, filename = "c1.pdf", dpi = 300, device = cairo_pdf,
+       width = 7, height = 7, units = "in")
+```
+```{r}
+
+```
+
+
+```{r}
+## Let's check whether binary outcome is associated to resolved/unresolved infection (by episode) according to CarpeDiem classification
+# Upload carpe diem table from Nick
+carpe_diem_orig <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/02data-internal_220901_1009.csv.gz")
+carpe_diem_tb <- carpe_diem_orig %>% 
+  dplyr::select(patient, day_bucket_starts, bal_barcode, Episode_category, Episode_etiology, Episode_is_cured, Episode_duration)
+
+# Merge with facs table
+facs_carpe <- left_join(facs_endpts_dayett, carpe_diem_tb, by = c("tc_pt_study_id" ="bal_barcode"))
+
+# Filter "episodes" only. Goes from 433 obs. to 288 obs.
+facs_carpe <- facs_carpe %>% 
+  drop_na(Episode_category)
+
+# Combine variables for plot
+facs_carpe <- facs_carpe %>% 
+  dplyr::mutate(Diagnosis = pna_type_verified) %>% 
+  mutate(dx_outcome = factor(paste(Diagnosis, Outcome, sep = ", ")))
+
+# Select columns of interest
+facs_carpe <- facs_carpe %>% 
+  dplyr::select(tc_pt_study_id, patient, Diagnosis, pna_type_verified, Infection_status =
+                Superinfection_verified, Infection_resolution_status = Episode_is_cured,
+                Outcome, Outcome, dayETT, finite_day_of_intubation, day_of_intubation,
+                binned_outcome, 'CD3 T cells', 'CD4 T cells', 'CD8 T cells', 'Neutrophils',
+                'Macrophages', 'Monocytes', 'Treg cells', Episode_duration, Episode_category,
+                Episode_etiology, dx_outcome)
+
+# Save csv
+write.csv(facs_carpe, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/facs_carpe_final.csv")
+```
+
+
+```{r}
+## Create plot with stats looking at resolved/unresolved episodes in viral pneumonias
+# COVID sample counts
+facs_carpe_cov_cts <- facs_carpe %>% 
+  dplyr::filter(Diagnosis == "COVID-19") %>% 
+  group_by(Outcome, Infection_resolution_status) %>% 
+  summarise(cts = n()) 
+
+# Stats for COVID
+facs_carpe_cov_cts_wide <- facs_carpe_cov_cts %>%
+pivot_wider(names_from =  "Outcome",
+              values_from = "cts")
+
+# Make outcome into rownames
+facs_carpe_cov_cts_wide  <- facs_carpe_cov_cts_wide %>%
+remove_rownames() %>%
+column_to_rownames(var = "Infection_resolution_status") %>% 
+dplyr::select(Discharged, Deceased)
+
+# Fisher test
+facs_carpe_cov_cts_stats <- row_wise_fisher_test(facs_carpe_cov_cts_wide,
+                                                 p.adjust.method = "fdr")
+
+
+# Factor
+facs_carpe_cov_cts$Outcome <- factor(facs_carpe_cov_cts$Outcome,
+                                      levels = c("Discharged", "Deceased"))
+
+facs_carpe_cov_cts$Infection_resolution_status <- factor(facs_carpe_cov_cts$Infection_resolution_status,
+                                                     levels = c("Cured", "Indeterminate", "Not cured", "NA"))
+
+# Plot COVID-19 pna by resolution status
+c2 <- ggplot(facs_carpe_cov_cts, aes(x = Outcome, y = cts, fill = Infection_resolution_status)) +
+  geom_bar(position = "fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values =  c("Cured" = infection_pal[6],
+                                "Indeterminate" = infection_pal[5],
+                                "Not cured" = infection_pal[1],
+                                "NA" = infection_pal[11])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="COVID-19 BAL samples\nEpisode outcome", # Episode outcome
+       subtitle="",
+       x="",
+       y="Proportion")
+
+
+c2 <- c2 + geom_signif(y_position=c(1.02,1.02), 
+                 xmin = c("Discharged", 1.5), xmax = c("Deceased", 3.5),
+                 annotations = c("2.1e-03 (C), 1.24e-02 (NC)"),
+                 tip_length = 0.0001) +
+  labs(fill = "Infection resolution status")
+
+c2
+
+# Save PDF
+ggsave(c2, filename = "c2.pdf", dpi = 300, device = cairo_pdf,
+       width = 7, height = 7, units = "in")
+
+```
+
+```{r}
+# Patch
+layout <- "AB"
+c1.2_tot <- c1 + c2 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = "right")
+
+c1.2_tot
+
+# Save PDF
+ggsave(c1.2_tot, filename = "c1.2_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 12, height = 7, units = "in")
+```
+```{r}
+## Let's explore correlation between alveolar immune cell subset abundance and clinical metadata
+# Select variables to explore
+# "WHITE_BLOOD_CELL_COUNT", "C_Reactive_Protein", "LDH" "CREATINE_KINASE_TOTAL", "PROCALCITONIN", "FERRITIN", "TROPONIN_I", "Creatinine", "AST_SGOT", "D_DIMER", "Absolute_Neutrophils", "ABSOLUTE_LYMPHOCYTES", "ABSOLUTE_EOSINOPHILS", "max_daily_temp", "mean_sofa" "mean_sofa", "mean_aps", "ECMO_yn", "binned_outcome", "smoking_status", "BMI", "FiO2", "PEEP", "Plateau_Pressure", "Static_Compliance", "driving_pressure", "Exhaled_Vt_mL", "HCO3_ART", "PF_ratio", "PH_ART", "PCO2_ART", "PH_ART", "PO2_ART", "HCO3_ART", "Vt_Set_mL", "Set_Rate, "pna_type_verified", "Superinfection_verified", "outcome", "finite_day_of_intubation"  
+
+# Add elder status
+facs_endpts <- facs_endpts %>%
+  dplyr::mutate(Elder_status = ifelse(age < 65, "≤ 65 years-old", "> 65 years-old"))
+
+# Get metadata
+facs_endpts_md <- facs_endpts %>% 
+  dplyr::mutate(Deceased = ifelse(Outcome == "Deceased", 1, 0),
+                Elder = ifelse(Elder_status == "> 65 years-old", 1, 0),
+                Superinfection = ifelse( Superinfection_verified =="Superinfection" | Superinfection_verified == "VAP", 1, 0),
+                pt_id = substr(tc_pt_study_id, 1,4)
+  )
+
+# Select medication and comorbidities variables of interest from Cathy's tables
+bal_meds <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/Luisa_meds_bal.csv") %>% 
+  dplyr::select(pt_id = patient, 
+                'Cumulative steroids dose' = cumulative_pred_equiv_during_admission, 
+                'Steroids' = received_steroids_during_admission,
+                'Tocilizumab' = received_tocilizumab_during_admission, 
+                'Remdesivir' = received_remdesivir_during_admission)
+
+bal_comor <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/Luisa_comorbidities_bal.csv") %>% 
+  dplyr::select(pt_id = patient, Diabetes, 'COPD' = Chronic_pulmonary_disease, 'CHF' = Congestive_heart_failure,
+                Cancer, 'Immunocompromised' = Imuunocompromised_flag, 
+                'Cerebrovascular disease' = Cerebrovascular_disease, 'PVD' = Peripheral_vascular_disease, 
+                'Renal disease' = Renal_disease, 'Liver disease' = Liver_disease)
+
+# Join
+bal_vars <- left_join(bal_meds, bal_comor, by = "pt_id")
+bal_vars$pt_id <- as.character(bal_vars$pt_id)
+
+# Get flow (by pna type) data
+facs_endpts_cells <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% # change pneumonia category
+  dplyr::select(tc_pt_study_id, "CD4 T cells", "CD8 T cells", "Treg cells",
+                "Neutrophils", "Macrophages", "Monocytes") %>% 
+  column_to_rownames("tc_pt_study_id")
+
+
+# Create final metadata table 
+facs_endpts_mdf <- left_join(facs_endpts_md, bal_vars, by = "pt_id") %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::select(tc_pt_study_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased, Superinfection,
+                'SOFA'= mean_sofa, BMI, 'WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein,
+                'CK' = CREATINE_KINASE_TOTAL, 'Ferritin' = FERRITIN,
+                'Neutrophils (blood)' = Absolute_Neutrophils,
+                'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                  LDH,  'Procalcitonin' = PROCALCITONIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER,  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,
+                'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 
+                'Days on MV'  = finite_day_of_intubation,'Steroids', Tocilizumab, Remdesivir, Diabetes, 'COPD', 'Immunocompromised') %>% 
+  column_to_rownames("tc_pt_study_id")
+
+# For OVP, too many NAs on ('WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein, 'CK' = CREATINE_KINASE_TOTAL, FERRITIN = Ferritin) does not allow  accurate p.val calculations. So will remove
+# Take out 'Tocilizumab', 'Remdesivir', Superinfection for OP
+
+# Correlation
+cor_df <- cor(facs_endpts_cells, facs_endpts_mdf, use = "pairwise.complete.obs", method = "spearman")
+
+# Stats
+testRes = cor.mtest(cbind(facs_endpts_cells, facs_endpts_mdf), method = "spearman") #method = "spearman"
+p.values <- testRes$p[1:ncol(facs_endpts_cells), (ncol(facs_endpts_cells) + 1):ncol(testRes$p)]
+pAdj <- p.adjust(p.values, method = "fdr")
+pAdj <- matrix(pAdj, ncol=ncol(facs_endpts_mdf))
+colnames(pAdj) <- colnames(cor_df)
+rownames(pAdj) <- rownames(cor_df)
+
+## Visualize with complexheatmap better than corrplot package
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-1,1, length.out = 10), 
+  rev(brewer.pal(10, "RdBu")))
+
+# Plot (COVID-19)
+cor_hm_cov <- Heatmap(matrix = cor_df,
+          # name = "Spearman (rho)",
+          cluster_rows = T,
+          cluster_columns = T,
+          clustering_distance_rows = "euclidean",
+          clustering_distance_columns = "euclidean",
+          clustering_method_columns = "ward.D2",
+          clustering_method_rows = "ward.D2",
+          show_column_names = T,
+          row_split = 3,
+          column_split = 2,
+          row_title = "Alveolar immune cell subsets",
+          column_title = "COVID-19",
+          col = col_fun,
+          heatmap_legend_param = list(title = "Spearman (rho)",
+                                           at = c(-1,-0.5,0,0.5,1), labels = c(-1,-0.5,0,0.5,1),
+                                           legend_direction = "vertical",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "right",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)),
+          cell_fun = function(j, i, x, y, w, h, fill) {
+            if(pAdj[i, j] < 0.001) {
+              grid.text("***", x, y)
+            } else if(pAdj[i, j] < 0.01) {
+              grid.text("**", x, y)
+            } else if(pAdj[i, j] < 0.05) {
+              grid.text("*", x, y)
+            }
+          },
+          column_names_rot = 40)
+
+cor_hm_cov <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cor_hm_cov, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "right", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+cor_hm_cov
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/cor_hm_cov.pdf", width=14, height=6)
+print(cor_hm_cov)
+dev.off()
+```
+
+
+```{r}
+# Plot (OP)
+# Get flow (by pna type) data
+facs_endpts_cells <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "Other pneumonia") %>% # change pneumonia category
+  dplyr::select(tc_pt_study_id, "CD4 T cells", "CD8 T cells", "Treg cells",
+                "Neutrophils", "Macrophages", "Monocytes") %>% 
+  column_to_rownames("tc_pt_study_id")
+
+
+# Create final metadata table 
+facs_endpts_mdf <- left_join(facs_endpts_md, bal_vars, by = "pt_id") %>% 
+  dplyr::filter(pna_type_verified == "Other pneumonia") %>% 
+  dplyr::select(tc_pt_study_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased,
+                'SOFA'= mean_sofa, BMI, 'WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein,
+                'CK' = CREATINE_KINASE_TOTAL, 'Ferritin' = FERRITIN,
+                'Neutrophils (blood)' = Absolute_Neutrophils,
+                'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                  LDH,  'Procalcitonin' = PROCALCITONIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER,  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,
+                'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 
+                'Days on MV'  = finite_day_of_intubation,'Steroids', Diabetes, 'COPD', 'Immunocompromised') %>% 
+  column_to_rownames("tc_pt_study_id")
+
+# For OVP, too many NAs on ('WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein, 'CK' = CREATINE_KINASE_TOTAL, FERRITIN = Ferritin) does not allow  accurate p.val calculations. So will remove
+# Take out 'Tocilizumab', 'Remdesivir', Superinfection for OP
+
+# Correlation
+cor_df <- cor(facs_endpts_cells, facs_endpts_mdf, use = "pairwise.complete.obs", method = "spearman")
+
+# Stats
+testRes = cor.mtest(cbind(facs_endpts_cells, facs_endpts_mdf), method = "spearman") #method = "spearman"
+p.values <- testRes$p[1:ncol(facs_endpts_cells), (ncol(facs_endpts_cells) + 1):ncol(testRes$p)]
+pAdj <- p.adjust(p.values, method = "fdr")
+pAdj <- matrix(pAdj, ncol=ncol(facs_endpts_mdf))
+colnames(pAdj) <- colnames(cor_df)
+rownames(pAdj) <- rownames(cor_df)
+
+## Visualize with complexheatmap  
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-1,1, length.out = 10), 
+  rev(brewer.pal(10, "RdBu")))
+
+# Plot
+cor_hm_op <- Heatmap(matrix = cor_df,
+          # name = "Spearman (rho)",
+          cluster_rows = T,
+          cluster_columns = T,
+          clustering_distance_rows = "euclidean",
+          clustering_distance_columns = "euclidean",
+          clustering_method_columns = "ward.D2",
+          clustering_method_rows = "ward.D2",
+          show_column_names = T,
+          row_split = 2,
+          column_split = 2,
+          row_title = "Alveolar immune cell subsets",
+          column_title = "Other pneumonia",
+          col = col_fun,
+                    heatmap_legend_param = list(title = "Spearman (rho)",
+                                           at = c(-1,-0.5,0,0.5,1), labels = c(-1,-0.5,0,0.5,1),
+                                           legend_direction = "vertical",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "right",
+                                           title_gp = gpar(fontface='bold',fontsize = 12)),
+          cell_fun = function(j, i, x, y, w, h, fill) {
+            if(pAdj[i, j] < 0.001) {
+              grid.text("***", x, y)
+            } else if(pAdj[i, j] < 0.01) {
+              grid.text("**", x, y)
+            } else if(pAdj[i, j] < 0.05) {
+              grid.text("*", x, y)
+            }
+          },
+          column_names_rot = 40)
+
+cor_hm_op <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cor_hm_op, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "right", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+cor_hm_op
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/cor_hm_op.pdf", width=14, height=6)
+print(cor_hm_op)
+dev.off()
+```
+
+```{r}
+# Plot for OVP
+# Get flow (by pna type) data
+facs_endpts_cells <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "Other viral pneumonia") %>% # change pneumonia category
+  dplyr::select(tc_pt_study_id, "CD4 T cells", "CD8 T cells", "Treg cells",
+                "Neutrophils", "Macrophages", "Monocytes") %>% 
+  column_to_rownames("tc_pt_study_id")
+
+
+# Create final metadata table 
+facs_endpts_mdf <- left_join(facs_endpts_md, bal_vars, by = "pt_id") %>% 
+  dplyr::filter(pna_type_verified == "Other viral pneumonia") %>% 
+  dplyr::select(tc_pt_study_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased, Superinfection,
+                'SOFA'= mean_sofa, BMI, 
+                'Neutrophils (blood)' = Absolute_Neutrophils,
+                'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                  LDH,  'Procalcitonin' = PROCALCITONIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER,  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,
+                'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 
+                'Days on MV'  = finite_day_of_intubation,'Steroids', Diabetes, 'COPD', 'Immunocompromised') %>% 
+  column_to_rownames("tc_pt_study_id")
+
+# For OVP, too many NAs on ('WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein, 'CK' = CREATINE_KINASE_TOTAL, FERRITIN = Ferritin) does not allow  accurate p.val calculations. So will remove
+# Take out 'Tocilizumab', 'Remdesivir', Superinfection for OP
+
+# Correlation
+cor_df <- cor(facs_endpts_cells, facs_endpts_mdf, use = "pairwise.complete.obs", method = "spearman")
+
+# Stats
+testRes = cor.mtest(cbind(facs_endpts_cells, facs_endpts_mdf), method = "spearman") #method = "spearman"
+p.values <- testRes$p[1:ncol(facs_endpts_cells), (ncol(facs_endpts_cells) + 1):ncol(testRes$p)]
+pAdj <- p.adjust(p.values, method = "fdr")
+pAdj <- matrix(pAdj, ncol=ncol(facs_endpts_mdf))
+colnames(pAdj) <- colnames(cor_df)
+rownames(pAdj) <- rownames(cor_df)
+
+## Visualize with complexheatmap
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-1,1, length.out = 10), 
+  rev(brewer.pal(10, "RdBu")))
+
+# Plot (change depending on pna category)
+cor_hm_ovp <- Heatmap(matrix = cor_df,
+          # name = "Spearman (rho)",
+          cluster_rows = T,
+          cluster_columns = T,
+          clustering_distance_rows = "euclidean",
+          clustering_distance_columns = "euclidean",
+          clustering_method_columns = "ward.D2",
+          clustering_method_rows = "ward.D2",
+          show_column_names = T,
+          row_split = 2,
+          column_split = 2,
+          row_title = "Alveolar immune cell subsets",
+          column_title = "Other viral pneumonia",
+          col = col_fun,
+                    heatmap_legend_param = list(title = "Spearman (rho)",
+                                           at = c(-1,-0.5,0,0.5,1), labels = c(-1,-0.5,0,0.5,1),
+                                           legend_direction = "vertical",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "right",
+                                           title_gp = gpar(fontface='bold',fontsize = 12)),
+          cell_fun = function(j, i, x, y, w, h, fill) {
+            if(pAdj[i, j] < 0.001) {
+              grid.text("***", x, y)
+            } else if(pAdj[i, j] < 0.01) {
+              grid.text("**", x, y)
+            } else if(pAdj[i, j] < 0.05) {
+              grid.text("*", x, y)
+            }
+          },
+          column_names_rot = 40)
+
+cor_hm_ovp <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cor_hm_ovp, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "right", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+cor_hm_ovp
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/cor_hm_ovp.pdf", width=14, height=6)
+print(cor_hm_ovp)
+dev.off()
+```
+
+```{r}
+# Plot for NPC
+# Get flow (by pna type) data
+facs_endpts_cells <- facs_endpts %>% 
+  dplyr::filter(pna_type_verified == "Non-pneumonia control") %>% # change pneumonia category
+  dplyr::select(tc_pt_study_id, "CD4 T cells", "CD8 T cells", "Treg cells",
+                "Neutrophils", "Macrophages", "Monocytes") %>% 
+  column_to_rownames("tc_pt_study_id")
+
+
+# Create final metadata table 
+facs_endpts_mdf <- left_join(facs_endpts_md, bal_vars, by = "pt_id") %>% 
+  dplyr::filter(pna_type_verified == "Non-pneumonia control") %>% 
+    dplyr::select(tc_pt_study_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased, 
+                'SOFA'= mean_sofa, BMI, 'WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein,
+                'CK' = CREATINE_KINASE_TOTAL, 
+                'Neutrophils (blood)' = Absolute_Neutrophils,
+                'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                  LDH,  'Procalcitonin' = PROCALCITONIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER,  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,
+                'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 
+                'Days on MV'  = finite_day_of_intubation,'Steroids', Diabetes, 'COPD', 'Immunocompromised') %>% 
+  column_to_rownames("tc_pt_study_id")
+
+# For OVP, too many NAs on ('WBC' = WHITE_BLOOD_CELL_COUNT, 'CRP' = C_Reactive_Protein, 'CK' = CREATINE_KINASE_TOTAL, FERRITIN = Ferritin) does not allow  accurate p.val calculations. So will remove
+# Take out 'Tocilizumab', 'Remdesivir', Superinfection for OP
+
+# Correlation
+cor_df <- cor(facs_endpts_cells, facs_endpts_mdf, use = "pairwise.complete.obs", method = "spearman")
+
+# Stats
+testRes = cor.mtest(cbind(facs_endpts_cells, facs_endpts_mdf), method = "spearman") #method = "spearman"
+p.values <- testRes$p[1:ncol(facs_endpts_cells), (ncol(facs_endpts_cells) + 1):ncol(testRes$p)]
+pAdj <- p.adjust(p.values, method = "fdr")
+pAdj <- matrix(pAdj, ncol=ncol(facs_endpts_mdf))
+colnames(pAdj) <- colnames(cor_df)
+rownames(pAdj) <- rownames(cor_df)
+
+## Visualize with complexheatmap   
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-1,1, length.out = 10), 
+  rev(brewer.pal(10, "RdBu")))
+
+# Plot (change depending on pna category)
+cor_hm_npc <- Heatmap(matrix = cor_df,
+          # name = "Spearman (rho)",
+          cluster_rows = T,
+          cluster_columns = T,
+          clustering_distance_rows = "euclidean",
+          clustering_distance_columns = "euclidean",
+          clustering_method_columns = "ward.D2",
+          clustering_method_rows = "ward.D2",
+          show_column_names = T,
+          row_split = 3,
+          column_split = 3,
+          row_title = "Alveolar immune cell subsets",
+          column_title = "Non-pneumonia control",
+          col = col_fun,
+                    heatmap_legend_param = list(title = "Spearman (rho)",
+                                           at = c(-1,-0.5,0,0.5,1), labels = c(-1,-0.5,0,0.5,1),
+                                           legend_direction = "vertical",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "right",
+                                           title_gp = gpar(fontface='bold',fontsize = 12)),
+          cell_fun = function(j, i, x, y, w, h, fill) {
+            if(pAdj[i, j] < 0.001) {
+              grid.text("***", x, y)
+            } else if(pAdj[i, j] < 0.01) {
+              grid.text("**", x, y)
+            } else if(pAdj[i, j] < 0.05) {
+              grid.text("*", x, y)
+            }
+          },
+          column_names_rot = 40)
+
+cor_hm_npc <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cor_hm_npc, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "right", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+cor_hm_npc
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/cor_hm_npc.pdf", width=14, height=6)
+print(cor_hm_npc)
+dev.off()
+```
+
+```{r}
+## All samples analysis for CD127 and HLA-DR expression on T cell subsets
+# Prepare data for merging all FACS samples
+# Extract MFI data from 5l df
+five_laser_mfi_all <- five_laser %>% 
+  dplyr::select(19:23)
+
+# Additional samples MFI
+additional_samples_mfi_all <- additional_samples %>% 
+  dplyr::select(23:27)
+
+five_laser_mfi_all <- bind_rows(five_laser_mfi_all, additional_samples_mfi_all) %>% 
+  distinct()
+
+duplicated(five_laser_mfi_all$tc_pt_study_id)
+
+# Add additional samples missing from 5l
+additional_samples_5l.2 <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/20220425_additional_samples.xlsx")
+
+# Add tc_pt_study_id column
+additional_samples_5l.2$tc_pt_study_id <-  substr(additional_samples_5l.2$Sample, 10,20) 
+
+# Additional sample %s from 4/25/22
+additional_samples_mfi_all.2 <- additional_samples_5l.2 %>% 
+  dplyr::select(23:27)
+
+# Drop NAs (6 rows)
+additional_samples_mfi_all.2 <- additional_samples_mfi_all.2 %>%   
+  drop_na()
+
+duplicated(additional_samples_mfi_all.2$tc_pt_study_id)
+
+five_laser_mfi_all <- bind_rows(five_laser_mfi_all, additional_samples_mfi_all.2) %>% 
+  distinct()
+
+duplicated(five_laser_mfi_all$tc_pt_study_id)
+
+# Find missing pt ID that need flow data (424 unique samples)
+facs_endpts_mfi <- inner_join(script_md, five_laser_mfi_all, by = "tc_pt_study_id") %>% 
+  distinct(tc_pt_study_id, .keep_all = T)
+
+duplicated(facs_endpts_mfi$tc_pt_study_id)
+
+# Transform string NAs
+facs_endpts_mfi$Superinfection_verified[facs_endpts_mfi$Superinfection_verified == "NA"] <- NA
+
+#add finite days
+facs_endpts_mfi$finite_day_of_intubation = facs_endpts_mfi$day_of_intubation
+facs_endpts_mfi$finite_day_of_intubation[is.infinite(facs_endpts_mfi$finite_day_of_intubation)] = NA
+
+# Add days for early late sample classification
+facs_endpts_mfi <- facs_endpts_mfi %>% 
+  mutate(dayETT = ifelse(finite_day_of_intubation <= 2, "≤ 48hrs", "> 48hrs"))
+
+# Extract only COVID-19 samples 
+facs_endpts_mfi_covid <- facs_endpts_mfi %>% 
+  filter(pna_type_verified == "COVID-19") 
+```
+
+```{r}
+## Let's investigate CD127 and HLA-DR expression in COVID-19 pts
+# Get flow data
+  facs_mfi_cov_cells <- facs_endpts_mfi_covid %>% 
+    dplyr::select(tc_pt_study_id, `CD4 MFI CD127`,`CD8 MFI CD127`,`CD4 MFI HLA-DR`, `CD8 MFI HLA-DR`) %>% 
+    column_to_rownames("tc_pt_study_id")
+
+
+# Get metadata
+  facs_endpts_mfi_covid_md <- facs_endpts_mfi_covid %>% 
+    dplyr::mutate(Deceased = ifelse(Outcome == "Deceased", 1, 0),
+                  Elder_status = ifelse(age <= 65, "≤ 65 years-old", "> 65 years-old"),
+                  Elder = ifelse(Elder_status == "> 65 years-old", 1, 0),
+                  Superinfection = ifelse( Superinfection_verified =="Superinfection" | Superinfection_verified == "VAP", 1, 0),
+                  pt_id = substr(tc_pt_study_id, 1,4)
+    )
+  
+# Create final metadata table
+# Join with other vars
+  facs_endpts_mfi_covid_mdf <- left_join(facs_endpts_mfi_covid_md, bal_vars, by = "pt_id")
+  
+# Get metadata
+  facs_endpts_mfi_covid_mdf <-  facs_endpts_mfi_covid_mdf %>% 
+    dplyr::select(tc_pt_study_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased, Superinfection, 'SOFA'= mean_sofa, BMI,
+                  'WBC'= WHITE_BLOOD_CELL_COUNT, 'Neutrophils (blood)' = Absolute_Neutrophils,'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                  'CRP' = C_Reactive_Protein, LDH,'CK' = CREATINE_KINASE_TOTAL, 'Procalcitonin' = PROCALCITONIN, 'Ferritin' = FERRITIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER, 
+                  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                  'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 'Days on MV'  = finite_day_of_intubation,
+                  'Steroids', 'Tocilizumab', 'Remdesivir', Diabetes, 'COPD', 'Immunocompromised') %>% 
+    column_to_rownames("tc_pt_study_id")
+
+
+# Correlation
+cor_mfi_cov <- cor(facs_mfi_cov_cells, facs_endpts_mfi_covid_mdf, use = "pairwise.complete.obs", method = "spearman")
+  
+# Stats
+testRes = cor.mtest(cbind(facs_mfi_cov_cells,  facs_endpts_mfi_covid_mdf), method = "spearman")
+p.values <- testRes$p[1:ncol(facs_mfi_cov_cells), (ncol(facs_mfi_cov_cells) + 1):ncol(testRes$p)]
+pAdj <- p.adjust(p.values, method = "fdr")
+pAdj <- matrix(pAdj, ncol=ncol(facs_endpts_mfi_covid_mdf))
+colnames(pAdj) <- colnames(cor_mfi_cov)
+rownames(pAdj) <- rownames(cor_mfi_cov)
+
+
+# Visualize with complexheatmap
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-1,1, length.out = 10), 
+  rev(brewer.pal(10, "RdBu")))
+
+# Plot
+cor_hm2 <- Heatmap(matrix = cor_mfi_cov,
+                  # name = "Spearman (rho)",
+                  cluster_rows = T,
+                  cluster_columns = T,
+                  clustering_distance_rows = "euclidean",
+                  clustering_distance_columns = "euclidean",
+                  clustering_method_columns = "ward.D2",
+                  clustering_method_rows = "ward.D2",
+                  show_column_names = T,
+                  row_split = 2,
+                  column_split = 2,
+                  row_title = "Alveolar T cell subsets",
+                  column_title = "COVID-19",
+                  col = col_fun,
+                            heatmap_legend_param = list(title = "Spearman (rho)",
+                                           at = c(-1,-0.5,0,0.5,1), labels = c(-1,-0.5,0,0.5,1),
+                                           legend_direction = "vertical",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "right",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)),
+                  cell_fun = function(j, i, x, y, w, h, fill) {
+                    if(pAdj[i, j] < 0.001) {
+                      grid.text("***", x, y)
+                    } else if(pAdj[i, j] < 0.01) {
+                      grid.text("**", x, y)
+                    } else if(pAdj[i, j] < 0.05) {
+                      grid.text("*", x, y)
+                    }
+                  },
+                  column_names_rot = 40)
+
+cor_hm2
+
+cor_hm2 <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cor_hm2, 
+           annotation_legend_side = "right", 
+           heatmap_legend_side = "right", 
+           merge_legend = FALSE),
+      width = 10, height = 5))
+
+cor_hm2
+
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/porjects/COVID19_BAL/FACS/cor_hm2.pdf", width=15, height=5)
+print(cor_hm2)
+dev.off()
+```
+
+# Continue on alluvial folder...
+
+

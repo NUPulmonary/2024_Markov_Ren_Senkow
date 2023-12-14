@@ -1,0 +1,1499 @@
+---
+title: "TCR-seq analysis of alveolar CD4 T cells in pneumonia patients"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goals:
+#	- Extract HLA-typing from pts w/i cohort using arcasHLA apckage
+#	- To identify distinct alveolar T cell networks linked to pna types
+#	- To identify distinct alveolar T cell SARS-CoV-2 specificity targets throughout the course of pna
+---
+
+
+```{r}
+# Set wd
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis") 
+
+library(igraph) 
+library(network) 
+library(sna)
+library(ggraph)
+library(visNetwork)
+library(threejs)
+library(networkD3)
+library(ndtv)
+library(ggstatsplot)
+library(msa)
+library(tinytex)
+library(data.table)
+library(formattable)
+library(htmltools)
+library(webshot)
+library(figpatch)
+library(ggsci)
+library(ggplot2)
+library(RColorBrewer)
+library(ggsignif)
+library(janitor)
+library(RColorBrewer)
+library(patchwork)
+library(ggalluvial)
+library(ggnewscale)
+library(extrafont)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(gridtext)
+
+# Set seed
+set.seed(8271)
+
+# Palettes
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+antigen_pal2 = pal_d3("category20")(20)
+hla_pal = pal_igv("default")(51)
+```
+
+
+```{r}
+## Obtain HLA typing data from arcasHLA
+# Load tcell samples (including 3 additional TCR samples w/o RNAseq data)
+tcell_samples_hla <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/tcell_ms_allsamples_with_extra_tcr_samples.xlsx")
+
+# Check for known technical duplicates
+tcell_samples_hla$tubeid[duplicated(tcell_samples_hla$tubeid)] 
+# 304020818 304017128 360780771 360761072 360761072
+
+# Add sample ID column
+tcell_samples_hla <- tcell_samples_hla %>%
+  dplyr::mutate(sample_id = paste0("S", tcell_samples_hla$tubeid)) %>% 
+  distinct()
+
+# Load HLA typing output data from arcasHLA (407 samples)
+hla_resolution <- read.delim("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/hla_typing/bam_files/output/script.resolution.tsv")
+hla_resolution <- hla_resolution %>% 
+  dplyr::rename(sample_id = subject)
+
+tcell_samples_hla$sample_id %in% hla_resolution$sample_id # which samples are missing for HLA data?
+tcell_samples_hla$sample_id[!tcell_samples_hla$sample_id %in% hla_resolution$sample_id] # 16 + 3 samples missing
+#  [1] "S360795729" "S360780825" "S360787493" "S360780493" "S360761065" "S304016075" "S304016085" "S304017112" "S300291991" "S304017540"
+#  [11] "S360796328" "S360762674" "S360762987" "S360762994" "S360761080" "S360780471" "S304017515" "S304017096" "S304016108"
+# NO RNAseq data for TCR extra NPC samples: "S304017515" "S304017096" "S304016108" (last 3)
+
+# Which samples are missing for HLA data w/i TCR data? (4)
+all_mixed_metadata2 <- all_mixed_metadata %>% 
+  dplyr::mutate(sample_id = paste0("S", all_mixed_metadata$tubeid)) 
+all_mixed_metadata2$sample_id %in% hla_resolution$sample_id
+all_mixed_metadata2$sample_id[!all_mixed_metadata2$sample_id %in% hla_resolution$sample_id] 
+# "S360761065" "S304017515" "S304017096" "S304016108"
+
+# Join with tcell samples ID
+hla_samples <- left_join(hla_resolution, tcell_samples_hla, by = "sample_id")
+
+# Join with TCR data
+all_hla_tcr_samples <- inner_join(all_mixed_metadata, hla_samples, by = "tubeid")
+
+# CD4 only (63 samples)
+cd4_hla_tcr_samples <- all_hla_tcr_samples %>% 
+  dplyr::filter(cell_type2 == "CD4")
+
+# Prepare CD4 input file for GLIPH2
+cd4_hla_tcr_input <- cd4_hla_tcr_samples %>% 
+  dplyr::select(1, 283:292, 303:306, 309, 310) 
+
+names(cd4_hla_tcr_input) <- NULL
+
+# Write table
+write.table(cd4_hla_tcr_input, file = "./cd4_hla_tcr_input.txt", row.names = F, sep = "\t", quote = F, col.names = F)
+write.csv(cd4_hla_tcr_input, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/cd4_hla_tcr_input.csv")
+```
+
+```{r}
+## Prepare input TCR file for GLIPH 2.0 Analysis
+# Combined all individual tibbles from Mixcr data - 107,944 TCRs / 36 variables
+cd4_gliph2 <- data.frame()
+for (name in names(cd4_immdata_mixcr$data)) {
+  df <- cd4_immdata_mixcr$data[[name]]
+  df$Sample <- name
+  cd4_gliph2 <- rbind(cd4_gliph2, df)
+} 
+
+
+# Save for supplemental file
+cd4_tcrs <- inner_join(cd4_gliph2, tcr_metadata_key, by = "Sample")
+
+# Save
+write.csv(cd4_tcrs, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/cd4_tcrs.csv")
+
+# Filter samples according to gene (check accurate total numbers = sanity check)
+cd4_gliph2_trbv <- filter(cd4_gliph2, str_detect(V.name, "TRBV"))  # 64,276
+cd4_gliph2_trav <- filter(cd4_gliph2, str_detect(V.name, "TRAV")) # 43,497
+cd4_gliph2_trdv <- filter(cd4_gliph2, str_detect(V.name, "TRDV")) # 171
+
+#Extract columns needed for input file (CDR3.aa, V.name, J.name, Sample)
+cd4_gliph2_input <- cd4_gliph2_trbv %>% 
+  dplyr::select(CDR3.aa, V.name, J.name, Sample)
+
+# Remove numbers after specific TR genes
+cd4_gliph2_input$V.name <- sub("\\*.*", "", cd4_gliph2_input$V.name)
+cd4_gliph2_input$J.name <- sub("\\*.*", "", cd4_gliph2_input$J.name)
+
+# Create separate column for unique V and J genes
+cd4_gliph2_input <- cd4_gliph2_input %>% 
+  dplyr::mutate(V_gene = gsub("\\-.*", "", cd4_gliph2_input$V.name)) 
+
+cd4_gliph2_input <- cd4_gliph2_input %>% 
+  dplyr::mutate(J_gene = gsub("\\-.*", "", cd4_gliph2_input$J.name)) 
+
+# Remove multiple TRBVs
+# cd4_gliph2_input$V.name<- word(cd4_gliph2_input$V.name,-1)
+
+# Add CD3a column
+cd4_gliph2_input <- cd4_gliph2_input %>% 
+  dplyr::select(CDR3.aa, V.name, J.name, Sample) %>% 
+  dplyr::mutate(CDR3a = NA) %>% 
+  relocate(CDR3a, .after = J.name) 
+
+# Add count comlumn
+cd4_gliph2_input <- cd4_gliph2_input %>% mutate(count = 1.0)
+cd4_gliph2_input_counted <- cd4_gliph2_input
+
+# Replace count for clone numbers (This will matter for clonal expansion score on GLIPH2)
+for (sample in unique(cd4_gliph2_input$Sample)) {
+  mixcr_sample <- cd4_immdata_mixcr$data[[sample]]
+  mixcr_sample$Sample <- sample
+  mixcr_sample <- mixcr_sample %>% group_by(Sample, CDR3.aa) %>% summarize(total_clones = sum(Clones), .groups = "keep")
+  cd4_gliph2_input_joined <- cd4_gliph2_input %>% left_join(mixcr_sample, by=c("Sample", "CDR3.aa"))
+  cd4_gliph2_input_counted[!is.na(cd4_gliph2_input_joined$total_clones), "count"] <- cd4_gliph2_input_joined$total_clones[!is.na(cd4_gliph2_input_joined$total_clones)]
+}
+
+# Add count to subject
+names(cd4_gliph2_input_counted) <- NULL #remove colnames
+
+#write table for output
+write.table(cd4_gliph2_input_counted, file = "./cd4_gliph2_input_counted.txt", row.names = F, sep = "\t", quote = F)
+write.csv(cd4_gliph2_input_counted, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/cd4_gliph2_input_counted.csv")
+```
+
+
+```{r}
+### GLIPH2 OUPUT CD4 T cells
+### Load GLIPH2 output table (CD4 data) Version 1 = literature reference 
+cd4_output_hla_v1 <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/cd4_hla_v1_output_1022_tb.csv") # 69,153
+
+# Remove NAs from TCRBs
+cd4_output_hla_v1 <- cd4_output_hla_v1[!is.na(cd4_output_hla_v1$TcRb), ] # 52,986
+
+gliph2_cd4_output_v1 <- merge(cd4_output_hla_v1, all_mixed_metadata, by.x = "Sample", by.y = "Sample", all = F)
+gliph2_cd4_output_v1  <- gliph2_cd4_output_v1  %>% 
+  relocate(c(study_id, tc_pt_study_id, cell.type, pna_type_verified, Outcome), .after = Sample)
+
+# Number of pts (43)
+length(unique(gliph2_cd4_output_v1$study_id))
+
+# Number of TCRbs (23667)  
+length(unique(gliph2_cd4_output_v1$TcRb))
+
+# Number of patterns (14171)
+length(unique(gliph2_cd4_output_v1$pattern))
+
+# Number of samples (65)
+length(unique(gliph2_cd4_output_v1$Sample))
+
+# Determine how many patients are included per cluster
+gliph2_cd4_pattern_v1 <- gliph2_cd4_output_v1 %>% 
+  group_by(pattern) %>% 
+  summarise(n_patients = n_distinct(study_id)) %>% 
+  ungroup()
+
+
+gliph2_cd4_pattern <- subset(gliph2_cd4_pattern_v1, pattern!= "single") # remove single row
+
+hist(gliph2_cd4_pattern$n_patients, breaks = 10) #
+
+
+# Get number of clusters with more than 3 patients  
+gliph2_cd4_pt3_v1 <- left_join(gliph2_cd4_output_v1, gliph2_cd4_pattern_v1, by = "pattern")
+gliph2_cd4_pt3_v1 <- gliph2_cd4_pt3_v1 %>% 
+  filter(n_patients >= 3)
+
+
+# Determine how many CDR3 are included per clusters 
+gliph2_cd4_cdr3_v1 <- gliph2_cd4_pt3_v1 %>% 
+  filter(number_unique_cdr3 >= 3) 
+
+# Determine how many CDR3 are included per clusters + vb_score <0.05
+gliph2_cd4_cdr3_vb_v1 <- gliph2_cd4_cdr3_v1 %>% 
+  filter(vb_score < 0.05)
+
+# Determine how many CDR3 are included per clusters + vb_score <0.05 + Fisher score <0.00001
+gliph2_cd4_cdr3_vb_fisher_v1 <- gliph2_cd4_cdr3_vb_v1 %>% 
+  filter(Fisher_score < 1e-4) 
+
+
+# Number of pts (40)
+length(unique(gliph2_cd4_cdr3_vb_fisher_v1$study_id))
+
+# Number of dx (4)
+length(unique(gliph2_cd4_cdr3_vb_fisher_v1$pna_type_verified))
+
+# Number of TCRbs (1252) 
+length(unique(gliph2_cd4_cdr3_vb_fisher_v1$TcRb))
+
+# Number of patterns (226)
+length(unique(gliph2_cd4_cdr3_vb_fisher_v1$pattern))
+
+# Number of samples (60)
+length(unique(gliph2_cd4_cdr3_vb_fisher_v1$Sample))
+
+
+# Determine how many clusters with > 3 unique CDR3s + vb_score <0.05 + Fisher score <0.00001 + expansion score <0.05
+gliph2_cd4_cdr3_vb_fisher_expansion_v1 <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+  filter(expansion_score <= 0.05) # 784 clusters
+
+# Number of pts (30)
+length(unique(gliph2_cd4_cdr3_vb_fisher_expansion_v1$study_id))
+
+# Number of dx (4)
+length(unique(gliph2_cd4_cdr3_vb_fisher_expansion_v1$pna_type_verified))
+
+# Number of TCRbs (182) 
+length(unique(gliph2_cd4_cdr3_vb_fisher_expansion_v1$TcRb))
+
+# Number of patterns (28)
+length(unique(gliph2_cd4_cdr3_vb_fisher_expansion_v1$pattern))
+
+# Number of samples (44)
+length(unique(gliph2_cd4_cdr3_vb_fisher_expansion_v1$Sample))
+```
+
+```{r}
+# Output for supplemental file
+cd4_postgliph2_filtering <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+  dplyr::select(1:35)
+
+# Add anonymized id
+cd4_postgliph2_filtered_supp <- inner_join(cd4_postgliph2_filtering, allu_rna_id_anonym, by = "study_id") %>% 
+  dplyr::select(-study_id)
+
+# Add anonymized sample id
+cd4_postgliph2_filtered_supp  <- cd4_postgliph2_filtered_supp  %>% 
+  dplyr::mutate(anonym_pt_study_id = gsub("^[^-]+", "", cd4_postgliph2_filtered_supp$tc_pt_study_id))
+  
+cd4_postgliph2_filtered_supp$Anonymized_pt_study_id <- paste(cd4_postgliph2_filtered_supp$Anonymized_id, cd4_postgliph2_filtered_supp$anonym_pt_study_id) 
+
+cd4_postgliph2_filtered_supp <- cd4_postgliph2_filtered_supp %>% 
+  dplyr::select(1:23, Cell = cell.type, Diagnosis = pna_type_verified, 27:35, 37)
+
+# Save file
+write.csv(cd4_postgliph2_filtered_supp, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/cd4_postgliph2_filtered_supp.csv")
+```
+
+```{r}
+## Let's visualize GLIPH2 output clusters/spcificity groups with network analysis
+# First, will investigate by all pna types
+ # Make nodes list
+ nodes_list <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+   dplyr::select(nodes = TcRb) %>% 
+   distinct() # 1,252
+ 
+ # Add ID
+ nodes_list <- nodes_list %>% rowid_to_column("id")
+ 
+ # All TCRs and pna_ type
+ col_node <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+   dplyr::select(TcRb, pna_type_verified) %>% 
+   distinct()
+ 
+ # Which TCRs share more than 1 group of pna type
+ tcr_pna <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+   group_by(TcRb) %>% 
+   summarise(weight = n_distinct(pna_type_verified)) 
+ 
+ tcr_pna_uni <- tcr_pna %>% 
+   filter(!weight > 1) %>% 
+   left_join(col_node, by = "TcRb")
+ 
+tcr_pna_mx <- tcr_pna %>% 
+   filter(weight > 1) 
+ 
+ # Add to node list
+ nodes_list <- left_join(nodes_list, tcr_pna_uni, by = c("nodes" = "TcRb"))
+ 
+# Make "Shared" TCRs between pna types as true NAs
+ nodes_list <- nodes_list %>%
+   replace_na(list(pna_type_verified = "Shared"))
+ 
+ # Factor
+ nodes_list$Diagnosis <- factor(nodes_list$pna_type_verified,
+                                levels = c("Non-pneumonia control", "Other pneumonia",
+                                           "Other viral pneumonia", "COVID-19", "Shared"))
+ ## Make edges list
+ ejes <- gliph2_cd4_cdr3_vb_fisher_v1 %>%
+   group_by(pattern, TcRb) %>%
+   summarise(weight = n()) %>%
+   ungroup()
+ 
+ ejes <- ejes %>% 
+   inner_join(ejes, by = "pattern") %>%
+   distinct(TcRb.x, TcRb.y)
+ 
+ ejes <- ejes %>% 
+   mutate(keeper = ifelse(TcRb.x == TcRb.y, "TRUE", "FALSE"))
+ 
+ ejes <- ejes %>% 
+   dplyr::filter(keeper == "FALSE") 
+ 
+ # Add from and to
+ edges_final <- ejes %>% 
+   left_join(nodes_list, by = c("TcRb.x" = "nodes")) %>% 
+   dplyr::rename(from = id)
+ 
+ edges_final <- edges_final %>% 
+   left_join(nodes_list, by = c("TcRb.y" = "nodes")) %>% 
+   dplyr::rename(to = id)           
+ 
+ edges_final <- edges_final %>%
+   dplyr::select(from, to)
+ 
+ routes_network <- network(edges_final, vertex.attr = nodes, matrix.type = "edgelist", ignore.eval = FALSE)
+ 
+ ## Plot ggraph
+ tcrs_graph <- tbl_graph(nodes = nodes_list, edges = edges_final, directed = FALSE)
+ tcrs_graph
+ plot(tcrs_graph)
+ 
+ 
+# Plot
+net_7_cd4 <- tcrs_graph %>% 
+  ggraph(layout = "graphopt") + 
+  geom_edge_fan(width = 0.5, colour = "gray", alpha = 0.5) + 
+  geom_node_point(aes(color = Diagnosis)) +
+                     scale_color_manual(values =
+                                         c("Non-pneumonia control" = pna_pal[2],
+                                           "Other pneumonia" = pna_pal[3],
+                                           "COVID-19" = pna_pal[1],
+                                           "Other viral pneumonia" = pna_pal[4],
+                                           "Shared" = pna_pal[5])) +
+   # guides(color = FALSE) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme_void() +
+  theme(text = element_text(family = "Arial"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_text(size = 14),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="")
+
+net_7_cd4    
+
+# Save PDF
+ggsave(net_7_cd4, filename = "net_7_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 7, units = "in")
+```
+
+```{r}
+## Now let's filter by pna type (COVID-19 vs Non-COVID-19)
+ gliph2_cd4_cdr3_vb_fisher_v1_cov <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+   filter(pna_type_verified == "COVID-19")
+ 
+ gliph2_cd4_cdr3_vb_fisher_v1_noncov <- gliph2_cd4_cdr3_vb_fisher_v1 %>% 
+   filter(pna_type_verified != "COVID-19")
+ 
+## Non-COVID-19 samples
+# Make nodes list
+ nodes_list <- gliph2_cd4_cdr3_vb_fisher_v1_noncov %>% 
+   dplyr::select(nodes = TcRb) %>% 
+   distinct() # 285
+ 
+ # Add ID
+ nodes_list <- nodes_list %>% rowid_to_column("id")
+ 
+ # All TCRs and pna_ type
+ col_node <- gliph2_cd4_cdr3_vb_fisher_v1_noncov %>% 
+   dplyr::select(TcRb, pna_type_verified) %>% 
+   distinct()
+ 
+ # Which TCRs share more than 1 group of pna type?
+ tcr_pna <- gliph2_cd4_cdr3_vb_fisher_v1_noncov %>% 
+   group_by(TcRb) %>% 
+   summarise(weight = n_distinct(pna_type_verified)) 
+ 
+ # Unique
+ tcr_pna_uni <- tcr_pna %>% 
+   filter(!weight > 1) %>% 
+   left_join(col_node, by = "TcRb")
+ 
+ # Multiple
+ tcr_pna_mx <- tcr_pna %>% 
+   filter(weight > 1) 
+ 
+ # Add to node list
+ nodes_list <- left_join(nodes_list, tcr_pna_uni, by = c("nodes" = "TcRb"))
+ 
+ # Chnage NAs
+ nodes_list <- nodes_list %>%
+   replace_na(list(pna_type_verified = "Shared"))
+ 
+ # Factor
+ nodes_list$Diagnosis <- factor(nodes_list$pna_type_verified,
+                                levels = c("Non-pneumonia control", "Other pneumonia",
+                                           "Other viral pneumonia", "Shared"))
+ ## Make edges list
+ ejes <- gliph2_cd4_cdr3_vb_fisher_v1_noncov %>%
+   group_by(pattern, TcRb) %>%
+   summarise(weight = n()) %>%
+   ungroup()
+ 
+ ejes <- ejes %>% 
+   inner_join(ejes, by = "pattern") %>%
+   distinct(TcRb.x, TcRb.y)
+ 
+ 
+ ejes <- ejes %>% 
+   mutate(keeper = ifelse(TcRb.x == TcRb.y, "TRUE", "FALSE"))
+ 
+ ejes <- ejes %>% 
+   dplyr::filter(keeper == "FALSE") 
+ 
+ # Add from and to
+ edges_final <- ejes %>% 
+   left_join(nodes_list, by = c("TcRb.x" = "nodes")) %>% 
+   dplyr::rename(from = id)
+ 
+ edges_final <- edges_final %>% 
+   left_join(nodes_list, by = c("TcRb.y" = "nodes")) %>% 
+   dplyr::rename(to = id)           
+ 
+ edges_final <- edges_final %>%
+   dplyr::select(from, to)
+ 
+ 
+ ## Plot ggraph
+ tcrs_graph <- tbl_graph(nodes = nodes_list, edges = edges_final, directed = FALSE)
+ tcrs_graph
+ plot(tcrs_graph)
+ 
+ 
+ # basic plot
+net_8_cd4 <- tcrs_graph %>% 
+   ggraph(layout = "graphopt") + 
+   geom_edge_fan(width = 0.5, colour = "gray", alpha = 0.5) + 
+   geom_node_point(aes(color = Diagnosis)) +
+   scale_color_manual(values =
+                        c("Non-pneumonia control" = pna_pal[2],
+                          "Other pneumonia" = pna_pal[3],
+                          "Other viral pneumonia" = pna_pal[4],
+                          "Shared" = pna_pal[5])) +
+  guides(color = FALSE) +
+ # guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme_void() +
+  theme(text = element_text(family = "Arial"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="")
+
+net_8_cd4    
+
+# Save PDF
+ggsave(net_8_cd4   , filename = "net_8_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 8.5, height = 6, units = "in")
+```
+
+```{r}
+## Covid-19 samples                  
+# Make nodes list
+ nodes_list <- gliph2_cd4_cdr3_vb_fisher_v1_cov %>% 
+   dplyr::select(nodes = TcRb, pna_type_verified) %>% 
+   distinct() # 799
+ 
+ # Add ID
+ nodes_list <- nodes_list %>% rowid_to_column("id")
+ 
+ 
+ # Factor
+ nodes_list$Diagnosis <- factor(nodes_list$pna_type_verified,
+                                levels = c("COVID-19"))
+ ## Make edges list
+ ejes <- gliph2_cd4_cdr3_vb_fisher_v1_cov %>%
+   group_by(pattern, TcRb) %>%
+   summarise(weight = n()) %>%
+   ungroup()
+ 
+ ejes <- ejes %>% 
+   inner_join(ejes, by = "pattern") %>%
+   distinct(TcRb.x, TcRb.y)
+ 
+ 
+ ejes <- ejes %>% 
+   mutate(keeper = ifelse(TcRb.x == TcRb.y, "TRUE", "FALSE"))
+ 
+ ejes <- ejes %>% 
+   dplyr::filter(keeper == "FALSE") 
+ 
+ # Add from and to
+ edges_final <- ejes %>% 
+   left_join(nodes_list, by = c("TcRb.x" = "nodes")) %>% 
+   dplyr::rename(from = id)
+ 
+ edges_final <- edges_final %>% 
+   left_join(nodes_list, by = c("TcRb.y" = "nodes")) %>% 
+   dplyr::rename(to = id)           
+ 
+ edges_final <- edges_final %>%
+   dplyr::select(from, to)
+ 
+ 
+ ## Plot ggraph
+ tcrs_graph <- tbl_graph(nodes = nodes_list, edges = edges_final, directed = FALSE)
+ tcrs_graph
+ plot(tcrs_graph)
+ 
+ 
+# Plot
+net_9_cd4 <- tcrs_graph %>% 
+   ggraph(layout = "graphopt") + 
+   geom_edge_fan(width = 0.5, colour = "gray", alpha = 0.5) + 
+   geom_node_point(aes(color = Diagnosis)) +
+   scale_color_manual(values =
+                        c("COVID-19" = pna_pal[1])) +
+    guides(color = FALSE) +
+   theme_void() +
+  #guides(colour = guide_legend(override.aes = list(size=4))) +
+  theme_void() +
+  theme(text = element_text(family = "Arial"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="")
+
+net_9_cd4  
+
+# Save PDF
+ggsave(net_9_cd4, filename = "net_9_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 8.5, height = 6, units = "in")
+ 
+```
+
+```{r}
+# Patch
+layout <- "AAB
+           AAC"
+
+net_tot_2 <- net_7_cd4 + net_8_cd4 + net_9_cd4 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+net_tot_2
+
+# Save PDF
+ggsave(net_tot_2, filename = "net_tot_2.pdf", dpi = 300, device = cairo_pdf,
+       width = 20, height = 12, units = "in")
+```
+
+
+```{r}
+## Upload MIRA dataset 
+mira_data_original_cd4 <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/peptide_detail_cii.csv") #6,809 TCRs
+
+# Split TCR_Bio column
+mira_data_original_cd4[c('TCR', 'chain1', 'chain2')] <- str_split_fixed(mira_data_original_cd4$TCR_BioIdentity, "\\+", 3)
+
+# Create copy of orginal table
+mira_data_cd4 <- mira_data_original_cd4
+
+# Remove "-" character on genes
+mira_data_cd4$chain1 <- gsub("\\/.*", "", mira_data_cd4$chain1)
+mira_data_cd4$chain2 <- gsub("\\/.*", "", mira_data_cd4$chain2)
+
+# Remove C letter
+mira_data_cd4$chain1 <- gsub("C", "", mira_data_cd4$chain1)
+mira_data_cd4$chain2 <- gsub("C", "", mira_data_cd4$chain2)
+
+# Keep distinct combination of these variable. # 6,357
+mira_data_cd4 <- mira_data_cd4 %>% 
+  distinct(TCR, ORF_Coverage, Amino_Acids) 
+# Total of 6,357 TCRs. Only 47 duplicated TCRs
+
+# Nest duplicate TCRs 
+mira_data_cd4 <- mira_data_cd4 %>% # 136,463
+  dplyr::group_by(TCR) %>% 
+  tidyr::nest() # Now with 0 duplicate TCRs
+
+  
+# Join with original MiXcr data
+mira_postgliph_cd4 <- inner_join(mira_data_cd4, gliph2_cd4_cdr3_vb_fisher_v1, by = c("TCR" = "TcRb")) # 364 (29% of 1,252)
+mira_postgliph_cd4_covid <- inner_join(mira_data_cd4, gliph2_cd4_cdr3_vb_fisher_v1_cov, by = c("TCR" = "TcRb")) # 291
+mira_postgliph_cd4_noncovid <- inner_join(mira_data_cd4, gliph2_cd4_cdr3_vb_fisher_v1_noncov, by = c("TCR" = "TcRb")) # 73
+
+# Unnest Ags and epitopes
+mira_postgliph_cd4_2 <- mira_postgliph_cd4 %>% # 381
+  tidyr::unnest(data)
+mira_postgliph_cd4_2_cov <- mira_postgliph_cd4_covid %>% # 308, 12/16 pts (4 COVID-19 pts w/o any matching epitopes in MIRA dataset)
+  tidyr::unnest(data)
+mira_postgliph_cd4_2_noncov <- mira_postgliph_cd4_noncovid %>% # 73, 7/24 pts
+  tidyr::unnest(data)
+
+# Split a:a column
+mira_postgliph_cd4_2$Epitope <- sub("([^,]+),", "\\1*", mira_postgliph_cd4_2$Amino_Acids)
+mira_postgliph_cd4_2$Epitope <- sub("\\*.*", "*", mira_postgliph_cd4_2$Epitope)
+
+
+mira_postgliph_cd4_2<- mira_postgliph_cd4_2 %>%
+  dplyr::mutate(
+    Antigen = case_when(
+      str_detect(ORF_Coverage, "membrane glycoprotein") & str_detect(ORF_Coverage, "surface glycoprotein") ~ "Membrane, Spike",
+      str_detect(ORF_Coverage, "surface glycoprotein") ~ "Spike",
+      str_detect(ORF_Coverage, "ORF1ab") & str_detect(ORF_Coverage, "surface glycoprotein") ~ "ORF1ab, Spike",
+      str_detect(ORF_Coverage, "envelope") & str_detect(ORF_Coverage, "ORF1ab") ~ "Envelope, ORF1ab",
+      str_detect(ORF_Coverage, "membrane glycoprotein") ~ "Membrane",
+      str_detect(ORF_Coverage, "nucleocapsid phosphoprotein") ~ "Nucleocapsid",
+      str_detect(ORF_Coverage, "ORF1ab") ~ "ORF1ab",
+      str_detect(ORF_Coverage, "ORF3a") ~ "ORF3a",
+      str_detect(ORF_Coverage, "ORF6") ~ "Envelope",
+      str_detect(ORF_Coverage, "ORF7a") ~ "ORF7a",
+      str_detect(ORF_Coverage, "ORF7b") ~ "ORF7b",
+      str_detect(ORF_Coverage, "ORF8") ~ "ORF8",
+      str_detect(ORF_Coverage, "ORF10") ~ "ORF10",
+      str_detect(ORF_Coverage, "envelope") ~ "Envelope",
+      TRUE ~ "no_antigen" ))
+```
+
+```{r}
+# Save mira data for supplemental figure
+cd4_mira <- mira_postgliph_cd4_2 %>% 
+  dplyr::select(TCR, ORF_Coverage, Amino_Acids, Sample)
+
+# Add anonymized id
+cd4_mira_crossref <- inner_join(cd4_mira, tcr_metadata_key, by = "Sample") 
+
+# Save file
+write.csv(cd4_mira_crossref, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/cd4_mira_crossref.csv")
+```
+
+```{r}
+# Read unique MCHI peptide pool hits from MIRA
+mira_peptide_pool2 <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/peptide_hits_cii.csv")  
+
+# Quantify how many "TOTAL" epitopes by deconvolving epitope pools from MIRA dataset
+mira_peptide_pool2_deconvo <- mira_peptide_pool2 %>% 
+  dplyr::group_by(ORF, Amino_Acids) %>% 
+  summarise(cts = n()) %>%
+  ungroup()
+# 56 unique pools
+
+# Unnest
+mira_peptide_pool2_deconvo_all <- mira_peptide_pool2_deconvo %>% 
+mutate(aa = str_split(Amino_Acids, ",")) %>%
+  unnest(aa)
+# 251 unique epitopes
+
+write.csv(mira_peptide_pool2_deconvo_all, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysismira_peptide_pool2_deconvo_all.csv")
+
+# How many peptide pools in our dataset
+unique(mira_postgliph_cd4_2$Amino_Acids) # 14 pools total 
+unique(mira_postgliph_cd4_2_cov$Amino_Acids) # 12 pools in COVID-19
+```
+
+
+```{r}
+# Let's look at antigen hierarchy/distribution in COVID-19 samples
+# Count by Antigen
+mira_postgliph_cd4_cov <- mira_postgliph_cd4_2 %>% 
+  filter(pna_type_verified == "COVID-19") %>%
+  group_by(Antigen, study_id) %>% 
+  summarise(cts = n()) %>% 
+  dplyr::mutate(pct = cts / sum(cts)*100) %>%
+  ungroup()
+
+# Factor
+mira_postgliph_cd4_cov$Antigen <- factor(mira_postgliph_cd4_cov$Antigen,
+                                        levels = c("ORF1ab", "ORF1ab, Spike",
+                                                   "Spike", "Envelope",
+                                                   "Envelope, ORF1ab", "Membrane",
+                                                   "Membrane, Spike", 
+                                                   "Nucleocapsid",
+                                                   "ORF3a",
+                                                   "ORF6",
+                                                   "ORF7a",
+                                                   "ORF7b",
+                                                   "ORF8",
+                                                   "ORF10"))
+
+# Plot proportion of all samples
+ag_cd4_1 <- ggplot(mira_postgliph_cd4_cov, aes(x = "", y = cts, fill = Antigen)) +
+  geom_bar(position = "fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values =
+                      c("ORF1ab" = antigen_pal2[7],
+                        "ORF1ab, Spike" = antigen_pal2[17],
+                        "Spike" = antigen_pal2[3],
+                        "Envelope" = antigen_pal2[5],
+                        "Envelope, ORF1ab" = antigen_pal2[15],
+                        "Membrane" = antigen_pal2[2],
+                        "Membrane, Spike" = antigen_pal2[12],
+                        "Nucleocapsid" = antigen_pal2[4],
+                        "ORF3a" = antigen_pal2[16],
+                        "ORF6" = antigen_pal2[18],
+                        "ORF7a" = antigen_pal2[11],
+                        "ORF7b" = antigen_pal2[1],
+                        "ORF8" = antigen_pal2[14],
+                        "ORF10" = antigen_pal2[19])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(title="", 
+       subtitle= "", #bquote(CD8^'+'~T~ cells)
+       x="",
+       y="Proportion")
+
+ag_cd4_1
+
+# Save PDF
+ggsave(ag_cd4_1, filename = "ag_cd4_1.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+
+
+
+```{r}
+## Let's quantify most common HLA on dataset by including only:
+# HLA prefix, gene and HLA allele
+# Group
+mira_postgliph_hla_cd4 <- mira_postgliph_cd4_2 %>% 
+  dplyr::select(Patient = study_id, Outcome, pna_type_verified, 'HLA-DPA1', 'HLA-DPB1', 'HLA-DQA1', 'HLA-DQB1',
+                'HLA-DRB1', 'HLA-DRB3', 'HLA-DRB4', 'HLA-DRB5')
+
+# Eliminate TCR column
+mira_postgliph_hla_cd4 <- mira_postgliph_hla_cd4[,-1]
+
+# Need to unnest first
+mira_postgliph_hla_cd4 <- mira_postgliph_hla_cd4 %>% 
+  dplyr::mutate(hla_dpa1 = str_split(mira_postgliph_hla_cd4$`HLA-DPA1`, "/"),
+                hla_dpb1 = str_split(mira_postgliph_hla_cd4$`HLA-DPB1`, "/"),
+                hla_dqa1 = str_split(mira_postgliph_hla_cd4$`HLA-DQA1`, "/"),
+                hla_dqb1 = str_split(mira_postgliph_hla_cd4$`HLA-DQB1`, "/"),
+                hla_drb1 = str_split(mira_postgliph_hla_cd4$`HLA-DRB1`, "/"),
+                hla_drb3 = str_split(mira_postgliph_hla_cd4$`HLA-DRB3`, "/"),
+                hla_drb4 = str_split(mira_postgliph_hla_cd4$`HLA-DRB4`, "/"),
+                hla_drb5 = str_split(mira_postgliph_hla_cd4$`HLA-DRB5`, "/")) %>% 
+  unnest(c(hla_dpa1, hla_dpb1, hla_dqa1, hla_dqb1, hla_drb1, hla_drb3, hla_drb4, hla_drb5))
+
+
+# Filter by COVID pts
+mira_postgliph_hla_cd4_cov <- mira_postgliph_hla_cd4 %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::select(Patient, Outcome, 'HLA-DPA1', 'HLA-DPB1', 'HLA-DQA1', 'HLA-DQB1',
+                'HLA-DRB1', 'HLA-DRB3', 'HLA-DRB4', 'HLA-DRB5') %>% 
+  dplyr::arrange(Outcome) %>% 
+  dplyr::distinct(Patient, .keep_all = T)
+
+# Save
+write.csv(mira_postgliph_hla_cd4_cov, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/mira_postgliph_hla_cd4_cov.csv")
+
+# Upload customized table by DP, DQ and DR alleles only. Will put complete table
+mira_postgliph_hla_cd4_cov2 <-  read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/mira_postgliph_hla_cd4_cov2.csv")
+
+# Let's customize table
+ft_hla2 = formattable(mira_postgliph_hla_cd4_cov2)
+
+ft_hla2 <- formattable(mira_postgliph_hla_cd4_cov2,
+                       align =c("l","c","c","c","c", "c", "c", "c", "c", "c", "c","r"), 
+                              list(Patient = formatter(
+                             "span", style = ~ style(color = "grey",font.weight = "bold")) 
+                              ))
+
+# Save
+export_formattable <- function(f, file, width = "90%", height = NULL, 
+                               background = "white", delay = 0.2)
+{
+  w <- as.htmlwidget(f, width = width, height = height)
+  path <- html_print(w, background = background, viewer = NULL)
+  url <- paste0("file:///", gsub("\\\\", "/", normalizePath(path)))
+  webshot(url,
+          file = file,
+          selector = ".formattable_widget",
+          delay = delay)
+}
+
+export_formattable(ft_hla2,"ft_hla2.png")
+
+export_formattable(
+  ft_hla2,
+  "ft_hla2.pdf",
+  width = "90%",
+  height = "70%",
+  background = "white",
+  delay = 10
+)
+```
+
+```{r}
+## Let's investigate gene Usage post-GLIPH2 analysis in MIRA dataset (all pts)
+# Count
+mira_postgliph_vusage_cd4 <- mira_postgliph_cd4_2 %>% 
+  group_by(V, pna_type_verified) %>% 
+  summarise(cts = n()) %>% 
+  dplyr::mutate(pct = cts / sum(cts)*100) %>%
+  dplyr::select(V_gene_usage = V, pna_type_verified, cts) %>% 
+  dplyr::arrange(V_gene_usage) %>%
+  ungroup()
+
+# Palette
+set.seed(1234)
+pal = pal_d3()(10)
+v_colors = colorRampPalette(pal_d3("category10")(10))(26)
+
+
+# #Factor
+mira_postgliph_vusage_cd4$pna_type_verified <- factor(mira_postgliph_vusage_cd4$pna_type_verified,
+                                    levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+
+# Transform data to annotate TRBV27 and TRBV12-3
+mira_postgliph_vusage_cd4 = transform(mira_postgliph_vusage_cd4, V_gene_usage_2 = ifelse(cts < 40, NA, V_gene_usage))
+
+# Plot proportion 
+v_usage_2_cd4 <- ggplot(mira_postgliph_vusage_cd4, aes(x = pna_type_verified, y = cts, fill = V_gene_usage)) +
+  geom_bar(position = "fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = v_colors) +
+ # guides( fill = "none") +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia","COVID-19", "Other\nviral pneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title.y = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle= "", 
+       x="",
+       y="Proportion")
+
+v_usage_2_cd4 <- v_usage_2_cd4 + labs(fill = "V-gene usage")
+v_usage_2_cd4
+
+# Save PDF
+ggsave(v_usage_2_cd4, filename = "v_usage_2_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 7, units = "in")
+```
+
+```{r}
+# Plot by V gene TCR numbers
+v_usage_3_cd4 <- ggplot(mira_postgliph_vusage_cd4, aes(x = pna_type_verified, y = cts, fill = V_gene_usage)) +
+  geom_bar(position = position_dodge2(preserve = "single"), stat="identity", width = 1) + 
+  theme_bw() +
+  scale_fill_manual(values = v_colors) +
+  geom_text(aes(label= V_gene_usage_2), 
+            position=position_dodge(width=1.2), 
+            vjust = -0.5,
+            size = 5) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+ # guides( fill = "none") +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia","COVID-19", "Other\nviral pneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of TCR sequences")
+
+v_usage_3_cd4 <- v_usage_3_cd4 + labs(fill = "V-gene usage")
+v_usage_3_cd4
+
+# Save PDF
+ggsave(v_usage_3_cd4, filename = "v_usage_3_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 7, units = "in")
+```
+
+```{r}
+# Patch
+v_usage_tot_cd4 <- (v_usage_2_cd4 + v_usage_3_cd4)  + plot_layout(guides = "collect") & theme(legend.position = 'right')
+
+v_usage_tot_cd4
+
+# Save PDF
+ggsave(v_usage_tot_cd4, filename = "v_usage_tot_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 7, units = "in")
+```
+
+```{r}
+# Quantify how many "TOTAL" epitopes in COVID-19 patients by deconvolving epitope pools from MIRA dataset
+mira_epi_cd4_deconvo <- mira_postgliph_cd4_2 %>% 
+  dplyr::group_by(Antigen, Amino_Acids) %>% 
+  summarise(cts = n()) %>%
+  ungroup()
+# 14 unique pools
+
+# Unnest
+mira_epi_cd4_deconvo_all <- mira_epi_cd4_deconvo %>% 
+mutate(aa = str_split(Amino_Acids, ",")) %>%
+  unnest(aa)
+# 72 unique epitopes
+
+write.csv(mira_epi_cd4_deconvo, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/mira_epi_cd4_deconvo_all.csv")
+
+
+# Quantify how many "TOTAL" epitopes in COVID-19 patients by deconvolving epitope pools from MIRA dataset
+mira_epi_cd4_deconvo_cov <- mira_postgliph_cd4_2 %>% 
+  dplyr::filter(pna_type_verified == "COVID-19") %>% 
+  dplyr::group_by(Antigen, study_id, Amino_Acids) %>% 
+  summarise(cts = n()) %>%
+  ungroup()
+# 12 unique pools
+
+# Unnest
+mira_epi_cd4_deconvo_cov <- mira_epi_cd4_deconvo_cov %>% 
+mutate(aa = str_split(Amino_Acids, ",")) %>%
+  unnest(aa)
+# 62 unique epitopes
+
+write.csv(mira_epi_cd4_deconvo_cov, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/mira_epi_cd4_deconvo_cov.csv")
+```
+
+```{r}
+## Epitope immunodominance in COVID-19 and unexposed individuals
+# Overall pts with CD4 T Cell samples from bulk TCR seq cohort
+cross_pt_cd4 <- all_mixed_metadata %>% 
+  dplyr::filter(cell.type == "CD4") %>% 
+  dplyr::select(pna_type_verified, study_id) %>% 
+  distinct() %>% 
+  dplyr::count(pna_type_verified)
+
+# Post MIRA cross-referencing pts
+cross_pt_mira_cd4 <- mira_postgliph_cd4_2 %>% 
+  dplyr::select(pna_type_verified, study_id) 
+cross_pt_mira_cd4 <- cross_pt_mira_cd4[, -1]
+cross_pt_mira_cd4 <- cross_pt_mira_cd4 %>% 
+  distinct() %>% 
+  dplyr::count(pna_type_verified)
+# Post mira distribution of pts: (12) COVID, (1) NPC, (4) OP (2) OVP
+
+# Count epitopes by COVID status 
+mira_epitopes_df_cd4 <- mira_postgliph_cd4_2 %>% 
+  group_by(Epitope, Antigen) %>%  
+  summarise(n_covid_pts = n_distinct(study_id[pna_type_verified == "COVID-19"]),
+            n_noncovid_pts = n_distinct(study_id[pna_type_verified != "COVID-19"]),
+            pct_alive_pts = n_distinct(study_id[Outcome == "Discharged"]) / n_distinct(study_id),
+            tcr = n_distinct(TCR))  %>% 
+  mutate(pct_covid_pts = n_covid_pts / cross_pt_cd4$n[cross_pt_cd4$pna_type_verified == "COVID-19"],
+         pct_noncovid_pts = n_noncovid_pts / sum(cross_pt_cd4$n[cross_pt_cd4$pna_type_verified != "COVID-19"])) %>% 
+  ungroup()     
+
+
+# Factor
+mira_epitopes_df_cd4$Antigen <- factor(mira_epitopes_df_cd4$Antigen,
+                                        levels = c("ORF1ab", "ORF1ab, Spike",
+                                                   "Spike", "Envelope",
+                                                   "Envelope, ORF1ab", "Membrane",
+                                                   "Membrane, Spike", 
+                                                   "Nucleocapsid",
+                                                   "ORF3a",
+                                                   "ORF6",
+                                                   "ORF7a",
+                                                   "ORF7b",
+                                                   "ORF8",
+                                                   "ORF10"))
+
+# Plot
+epi_cross <- ggplot(mira_epitopes_df_cd4, aes(x = pct_covid_pts, y = pct_noncovid_pts)) +
+  geom_jitter(aes(size = tcr, colour = Antigen), width = 0.01, height = 0.01) +
+  theme_bw() +
+  scale_color_manual(values =
+                      c("ORF1ab" = antigen_pal2[7],
+                        "ORF1ab, Spike" = antigen_pal2[17],
+                        "Spike" = antigen_pal2[3],
+                        "Envelope" = antigen_pal2[5],
+                        "Envelope, ORF1ab" = antigen_pal2[15],
+                        "Membrane" = antigen_pal2[2],
+                        "Membrane, Spike" = antigen_pal2[12],
+                        "Nucleocapsid" = antigen_pal2[4],
+                        "ORF3a" = antigen_pal2[16],
+                        "ORF6" = antigen_pal2[18],
+                        "ORF7a" = antigen_pal2[11],
+                        "ORF7b" = antigen_pal2[1],
+                        "ORF8" = antigen_pal2[14],
+                        "ORF10" = antigen_pal2[19])) +
+  geom_label_repel(aes(label = Epitope), 
+                       box.padding = 1,
+                       nudge_y = 0.4,
+                       direction = "both",
+                       segment.curvature = 0.05,
+                       max.iter = 1e5, max.time = 1,
+                       max.overlaps = Inf, force = 100, force_pull = 100,
+                       data = mira_epitopes_df_cd4[c(3,8,10,11,14),]) +
+  scale_x_continuous(limits = c(0, 1), breaks = c(0,0.2,0.4,0.6,0.8,1)) +
+  scale_y_continuous(expand = expansion(mult = c(.07, .075)), limits = c(0,1), breaks = c(0,0.2,0.4,0.6,0.8,1)) +
+  geom_abline(linetype="dashed", color="gray", size = 0.5) +
+  guides(color = guide_legend(override.aes = list(size=5), ncol = 1, order = 1),
+         size = guide_legend(ncol = 1, order = 2)) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0, hjust = 0),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  labs(title="", 
+       y="Epitope prevalence in unexposed patients",
+       x="Epitope prevalence in COVID-19 patients") 
+
+epi_cross_cd4 <- epi_cross + labs(size = "TCR Count")
+epi_cross_cd4
+
+# Save PDF
+ggsave(epi_cross_cd4, filename = "epi_cross_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Quantify prevalence
+epitopes_cd4_box <- mira_epitopes_df_cd4 %>% 
+  pivot_longer(cols = pct_covid_pts:pct_noncovid_pts,
+               names_to = "cov_status",
+               values_to = "Prevalence") %>% 
+  dplyr::mutate(cov_status = case_when(
+          str_detect(cov_status, "pct_covid_pts") ~ "COVID-19",
+          str_detect(cov_status, "pct_noncovid_pts") ~ "Non-COVID-19",
+          TRUE ~ "no_status" ))
+
+# Factor
+epitopes_cd4_box$cov_status <- factor(epitopes_cd4_box$cov_status, 
+                                      levels = c("COVID-19", "Non-COVID-19"))
+
+# Stats
+stats_epi_cd4 = pairwise.wilcox.test(epitopes_cd4_box$Prevalence, 
+                            epitopes_cd4_box$cov_status) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+                
+# Plot
+epi_cross <- ggplot(epitopes_cd4_box, aes(x=cov_status, y=Prevalence)) + 
+  geom_boxplot(aes(fill = cov_status), outlier.shape = NA) + 
+  geom_point(aes(fill = cov_status), position = position_jitterdodge(jitter.width = 0.25)) +
+  theme_bw() +
+  scale_fill_manual(values = c("COVID-19" = pna_pal[1],
+                               "Non-COVID-19" = pna_pal[5])) +
+  #guides(fill = "none") +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x=" ",
+       y="Epitope prevalence")
+
+epi_cross_cd4_2 <- epi_cross + labs(fill = "COVID-19 status") + geom_signif(y_position=c(0.6, 0.6),
+                  xmin = c("COVID-19", 1.5), xmax = c("Non-COVID-19", 2.5),
+                  annotations = c("9.32e-04"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+epi_cross_cd4_2
+
+# Save PDF
+ggsave(epi_cross_cd4_2, filename = "epi_cross_cd4_2.pdf", dpi = 300, device = cairo_pdf,
+       width = 7, height = 7, units = "in")
+```
+
+```{r}
+## Let's uncover T cell dominanace and prevalence of epitopes in COVID-19 pts
+# Filter by pna type (COVID-19)
+mira_postgliph_cd4_cov_epi <- mira_postgliph_cd4_2 %>% 
+  filter(pna_type_verified == "COVID-19") 
+
+# Non-COVID-19 samples
+# Make nodes list 14 unique pts
+nodes_list <- as.data.frame(unique(mira_postgliph_cd4_cov_epi$study_id))
+colnames(nodes_list)[colnames(nodes_list) == 'unique(mira_postgliph_cd4_cov_epi$study_id)'] <- 'nodes'
+
+# Add ID
+nodes_list <- nodes_list %>% rowid_to_column("id")
+
+# Load anonymous IDs for patients
+tcr_anonym <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/tcr_anonym.csv")
+tcr_anonym$script_id <- as.character(tcr_anonym$script_id)
+nodes_list <- left_join(nodes_list, tcr_anonym, by = c("nodes" = "script_id"))
+
+# Make edges list
+ejes <- data.frame(matrix(ncol = 5, nrow = 0))
+colnames(ejes) <- c("study_id.x", "study_id.y", "Antigen","Epitope", "weight")
+
+# Create ejes comprised of shared TCRs recognizing epitopes within covid pts
+for (pt1 in nodes_list$nodes) {
+  for (pt2 in nodes_list$nodes) {
+    if (pt2 > pt1) {
+      tcr_subset <- mira_postgliph_cd4_cov_epi  %>% 
+        dplyr::filter(study_id %in% c(pt1, pt2)) %>% 
+        dplyr::group_by(Epitope, Antigen) %>% 
+        summarise(n_pts = n_distinct(study_id)) %>% 
+        dplyr::filter(n_pts == 2)
+      for (epitope in unique(tcr_subset$Epitope)) {
+        ag <- tcr_subset$Antigen[tcr_subset$Epitope == epitope][1]
+        ejes[nrow(ejes) + 1, ] <- list(pt1, pt2, ag, epitope, 1)
+      }
+    }
+  }
+}
+
+
+for (i in 1:nrow(ejes)) {
+  row <- ejes[i, ]
+  common_tcrs <- mira_postgliph_cd4_cov_epi %>% 
+    dplyr::filter(study_id %in% c(row$study_id.x, row$study_id.y), Antigen == row$Antigen) %>% 
+    dplyr::group_by(Epitope) %>% 
+    summarise(n_pts = n_distinct(study_id)) %>% 
+    dplyr::filter(n_pts == 2)
+  ejes[i, "weight"] <- nrow(common_tcrs)
+}
+
+
+# Quantify epitope weight in ejes
+ejes_cd4_epi <- ejes %>% # 8 unique pools, 44 unique epitopes
+  dplyr::group_by(Epitope) %>% 
+  summarise(weight = n()) %>%
+  dplyr::mutate(pct_weight = weight / sum(weight)*100) 
+
+ejes_cd4_epi.2 <- ejes %>% 
+  dplyr::group_by(Epitope) %>% 
+  summarise(weight = sum(weight))  %>%
+  dplyr::mutate(pct_weight = weight / sum(weight)*100) 
+
+# Add from and to
+edges_final <- ejes %>% 
+  left_join(nodes_list, by = c("study_id.x" = "nodes")) %>% 
+  dplyr::rename(from = id)
+
+edges_final <- edges_final %>% 
+  left_join(nodes_list, by = c("study_id.y" = "nodes")) %>% 
+  dplyr::rename(to = id)           
+
+edges_final <- edges_final %>%
+  dplyr::select(from, to, Antigen, weight)
+
+edges_final <- edges_final %>% 
+  dplyr::group_by(from, to, Antigen) %>% 
+  summarise(weight = n()) %>% 
+  dplyr::rename(Magnitude = weight)
+
+# Factor
+edges_final$Antigen <- factor(edges_final$Antigen,
+                                        levels = c("ORF1ab", "ORF1ab, Spike",
+                                                   "Spike", "Envelope",
+                                                   "Envelope, ORF1ab", "Membrane",
+                                                   "Membrane, Spike", 
+                                                   "Nucleocapsid",
+                                                   "ORF3a",
+                                                   "ORF6",
+                                                   "ORF7a",
+                                                   "ORF7b",
+                                                   "ORF8",
+                                                   "ORF10"))
+
+# Save
+write.csv(nodes_list,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/TCR/analysis/nodes_list_cd4.csv")
+
+# Rename
+nodes_list <- nodes_list %>% 
+  dplyr::select(-nodes) %>% 
+  dplyr::rename(Patient = Anonymized_id)
+
+# Plot ggraph
+tcrs_graph <- tbl_graph(nodes = nodes_list, edges = edges_final, directed = FALSE)
+tcrs_graph
+plot(tcrs_graph)
+
+
+# Plot
+net_4_cd4_orig <- tcrs_graph %>% 
+  ggraph(layout = "linear") +
+  geom_edge_fan(aes(color = Antigen, edge_width = Magnitude, edge_alpha = Magnitude)) + 
+  scale_edge_width(range = c(1,2), breaks = c(1,2)) +
+  scale_edge_color_manual(values =
+                      c("ORF1ab" = antigen_pal2[7],
+                        "ORF1ab, Spike" = antigen_pal2[17],
+                        "Spike" = antigen_pal2[3],
+                        "Envelope" = antigen_pal2[5],
+                        "Envelope, ORF1ab" = antigen_pal2[15],
+                        "Membrane" = antigen_pal2[2],
+                        "Membrane, Spike" = antigen_pal2[12],
+                        "Nucleocapsid" = antigen_pal2[4],
+                        "ORF3a" = antigen_pal2[16],
+                        "ORF6" = antigen_pal2[18],
+                        "ORF7a" = antigen_pal2[11],
+                        "ORF7b" = antigen_pal2[1],
+                        "ORF8" = antigen_pal2[14],
+                        "ORF10" = antigen_pal2[19])) +
+  guides(edge_color = guide_legend(override.aes = list(edge_width = 4), order = 1)) +
+  guides(edge_width = guide_legend(override.aes = list(size=5), direction = "vertical")) +
+  guides(edge_alpha = "none") +
+  new_scale_color() +
+  geom_node_point(aes(color = Patient, size = 1)) +
+  guides(size = "none") +
+  scale_color_manual(values = 
+                       c("A" = antigen_pal2[7],
+                         "B" = antigen_pal2[9],
+                         "C" = antigen_pal2[11],
+                         "D" = antigen_pal2[15],
+                         "E" = antigen_pal2[5],
+                         "F" = antigen_pal2[4],
+                         "G" = antigen_pal2[3],
+                         "H" = antigen_pal2[13],
+                         "I" = antigen_pal2[6],
+                         "J" = antigen_pal2[8],
+                         "K" = antigen_pal2[1],
+                         "L" = antigen_pal2[2],
+                         "M" = antigen_pal2[10],
+                         "N" = antigen_pal2[12],
+                         "O" = antigen_pal2[14])) +
+  theme_void() +
+  guides(color = guide_legend(override.aes = list(size=5), direction = "vertical", order = 2, nrow = 6)) +
+  theme(legend.position="bottom") +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_blank(),
+        axis.title = element_text(size = 12),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.direction = "vertical",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="")
+
+net_4_cd4_orig
+
+# Save PDF
+ggsave(net_4_cd4_orig, filename = "net_4_cd4_orig.pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 8, units = "in")
+```
+
+```{r}
+## Look at epitope immunoprevalence
+# Merge with Antigen
+ejes_all_cd4 <- ejes %>% 
+  dplyr::select(Antigen, Epitope) %>% 
+  distinct()
+
+# Make final df
+ag_all_cd4 <- inner_join(ejes_cd4_epi, ejes_all_cd4, by = "Epitope") %>% 
+  distinct()  
+
+
+# Factor
+ag_all_cd4$Antigen <- factor(ag_all_cd4$Antigen,
+                                        levels = c("ORF1ab", "ORF1ab, Spike",
+                                                   "Spike", "Envelope",
+                                                   "Envelope, ORF1ab", "Membrane",
+                                                   "Membrane, Spike", 
+                                                   "Nucleocapsid",
+                                                   "ORF3a",
+                                                   "ORF6",
+                                                   "ORF7a",
+                                                   "ORF7b",
+                                                   "ORF8",
+                                                   "ORF10"))
+
+
+# Plot prevalence (most shared epitopes across pts)
+epi_all_prev_cd4 <- ggplot(ag_all_cd4, aes(x = reorder(Epitope, pct_weight), y = pct_weight, fill = Antigen)) +
+  geom_bar(position = position_dodge2(preserve = "single"), stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("ORF1ab" = antigen_pal2[7],
+                        "ORF1ab, Spike" = antigen_pal2[17],
+                        "Spike" = antigen_pal2[3],
+                        "Envelope" = antigen_pal2[5],
+                        "Envelope, ORF1ab" = antigen_pal2[15],
+                        "Membrane" = antigen_pal2[2],
+                        "Membrane, Spike" = antigen_pal2[12],
+                        "Nucleocapsid" = antigen_pal2[4],
+                        "ORF3a" = antigen_pal2[16],
+                        "ORF6" = antigen_pal2[18],
+                        "ORF7a" = antigen_pal2[11],
+                        "ORF7b" = antigen_pal2[1],
+                        "ORF8" = antigen_pal2[14],
+                        "ORF10" = antigen_pal2[19])) +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Prevalence (%)") 
+
+epi_all_prev_cd4
+
+# Save PDF
+ggsave(epi_all_prev_cd4, filename = "epi_all_prev_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 8, units = "in")
+```
+
+```{r}
+## Look at epitope immunodominance
+ag_all_cd4_2 <- inner_join(ejes_cd4_epi.2, ejes_all_cd4, by = "Epitope") %>% 
+  distinct() 
+
+# Factor
+ag_all_cd4_2$Antigen <- factor(ag_all_cd4_2$Antigen,
+                                        levels = c("ORF1ab", "ORF1ab, Spike",
+                                                   "Spike", "Envelope",
+                                                   "Envelope, ORF1ab", "Membrane",
+                                                   "Membrane, Spike", 
+                                                   "Nucleocapsid",
+                                                   "ORF3a",
+                                                   "ORF6",
+                                                   "ORF7a",
+                                                   "ORF7b",
+                                                   "ORF8",
+                                                   "ORF10"))
+
+# Plot epitopes with more TCR sequences recognizing them
+epi_all_dom_cd4 <- ggplot(ag_all_cd4_2, aes(x = reorder(Epitope, pct_weight), y = pct_weight, fill = Antigen)) +
+  geom_bar(position = position_dodge2(preserve = "single"), stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("ORF1ab" = antigen_pal2[7],
+                        "ORF1ab, Spike" = antigen_pal2[17],
+                        "Spike" = antigen_pal2[3],
+                        "Envelope" = antigen_pal2[5],
+                        "Envelope, ORF1ab" = antigen_pal2[15],
+                        "Membrane" = antigen_pal2[2],
+                        "Membrane, Spike" = antigen_pal2[12],
+                        "Nucleocapsid" = antigen_pal2[4],
+                        "ORF3a" = antigen_pal2[16],
+                        "ORF6" = antigen_pal2[18],
+                        "ORF7a" = antigen_pal2[11],
+                        "ORF7b" = antigen_pal2[1],
+                        "ORF8" = antigen_pal2[14],
+                        "ORF10" = antigen_pal2[19])) +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text.x = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.text.y = element_blank(),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Total TCR recognizing epitope (%)") 
+
+epi_all_dom_cd4
+
+# Save PDF
+ggsave(epi_all_dom_cd4, filename = "epi_all_dom_cd4.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AB"
+
+epi_all_cd4_tot <- epi_all_prev_cd4 + epi_all_dom_cd4 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'right')
+
+epi_all_cd4_tot
+
+# Save PDF
+ggsave(epi_all_cd4_tot, filename = "epi_all_cd4_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 13, height = 8, units = "in")
+```
+
+
+
+
+
+```{r}
+## Generate figure and table
+# need to download magick first
+dyn.load("/hpc/software/ImageMagick/7.1.0-31/lib/libMagick++-7.Q16HDRI.so.5.0.0")
+
+# Download HLA class II table
+image_path <- system.file(
+  "extdata", 
+  "ft_hla2_bold.png",
+  package = "figpatch", 
+  mustWork = TRUE)
+
+image_path
+
+ft_hla2_table <- fig(image_path)
+```
+
+
+```{r}
+# Supp TCR figure 5
+layout <- "ABBBCCCCCDD
+           ABBBCCCCCDD
+           FFGGCCCCCEE
+           FFGGCCCCCEE
+           HHHHHIIIIIJ
+           HHHHHIIIIIJ"
+
+tcr_sfig5 <- ag_cd4_1 + ft_hla2_table + net_7_cd4 + net_8_cd4 + net_9_cd4 +
+             net_4_cd4_orig + epi_all_cd4_tot +
+             v_usage_tot_cd4 + epi_cross_cd4 + epi_cross_cd4_2 + 
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(
+  plot.tag = element_text(face = 'bold', size = 14))
+
+tcr_sfig5
+
+# Save PDF
+ggsave(tcr_sfig5, filename = "tcr_sfig5.pdf", dpi = 300, device = cairo_pdf,
+       width = 33, height = 20, units = "in")
+```
+
+
+
+
+
+
+
+

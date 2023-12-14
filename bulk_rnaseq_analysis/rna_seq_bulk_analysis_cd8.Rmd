@@ -1,0 +1,3332 @@
+---
+title: "Bulk RNA-seq analysis of alveolar CD8+ T cells"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: to identify transcriptional signatures associated with outcomes throughout the course of severe pna
+---
+
+
+```{r}
+options(warn = 2, keep.source = TRUE, error = quote({
+  # Debugging in R
+  #   http://www.stats.uwo.ca/faculty/murdoch/software/debuggingR/index.shtml
+  #
+  # Post-mortem debugging
+  #   http://www.stats.uwo.ca/faculty/murdoch/software/debuggingR/pmd.shtml
+  #
+  # Relation functions:
+  #   dump.frames
+  #   recover
+  # >>limitedLabels  (formatting of the dump with source/line numbers)
+  #   sys.frame (and associated)
+  #   traceback
+  #   geterrmessage
+  #
+  # Output based on the debugger function definition.
+  
+  # TODO: setup option for dumping to a file (?)
+  # Set `to.file` argument to write this to a file for post-mortem debugging    
+  dump.frames()  # writes to last.dump
+  n <- length(last.dump)
+  if (n > 0) {
+    calls <- names(last.dump)
+    cat("Environment:\n", file = stderr())
+    cat(paste0("  ", seq_len(n), ": ", calls), sep = "\n", file = stderr())
+    cat("\n", file = stderr())
+  }
+  
+  if (!interactive()) q()
+}))
+```
+
+```{r}
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/") 
+
+library(dplyr)
+library(edgeR)
+library(DESeq2)
+library(statmod)
+library(fgsea)
+library(gage)
+library(topGO)
+library(rrvgo)
+library(factoextra)
+library(stringi)
+library(Cairo)
+library(ggsci)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(devtools)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(ggnewscale)
+library(patchwork)
+library(biomaRt)
+
+# Set seed
+set.seed(8271)
+
+# Palettes
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+antigen_pal2 = pal_d3("category20")(20)
+```
+
+```{r}
+## Get annotation from biomaRt
+sapiens_mart = useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+
+saveRDS(sapiens_mart, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/sapiens_mart.rds")
+
+anno_mart <- getBM(mart = sapiens_mart, 
+                   attributes = c('go_id', 'external_gene_name', 'ensembl_gene_id', 'description'))
+
+saveRDS(anno_mart, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/anno_mart.rds")
+```
+
+
+```{r}
+## Load nextflow files from Ziyou
+# Set NF directory to pull files
+nextflow_dirs = list.files(path = "/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow", 
+                           pattern = "Nextflow_\\d{6}$",
+                           include.dirs = T,
+                           full.names = T,
+                           recursive = F)
+
+files = paste0(nextflow_dirs, "/results/star_salmon/deseq2_qc/deseq2.dds.RData")
+
+loadRData = function(filepath){
+  load(filepath)
+  get(ls()[ls() != "filepath"])
+}
+
+datasets = lapply(files, loadRData)
+names(datasets) = basename(nextflow_dirs)
+
+# Add batch numbers
+for(i in 1:length(datasets))
+{
+  datasets[[i]]$batch = names(datasets)[i]
+  datasets[[i]]$sample = ifelse(grepl("[uh]RNA", datasets[[i]]$sample),
+                                yes = paste(datasets[[i]]$sample, datasets[[i]]$batch, sep = "_"),
+                                no = datasets[[i]]$sample)
+  colnames(datasets[[i]]) = ifelse(grepl("[uh]RNA", colnames(datasets[[i]])),
+                                   yes = paste(colnames(datasets[[i]]), datasets[[i]]$batch, sep = "_"),
+                                   no = colnames(datasets[[i]]))
+}
+
+# Join into single dataset
+all_samples = datasets %>% 
+  purrr::reduce(cbind)
+
+# Join technical replicates
+all_samples = collapseReplicates(all_samples, groupby = all_samples$sample)
+
+# Remove Bria's nasal samples
+all_samples = all_samples[, !(grepl("Nasal", all_samples$sample))]
+
+```
+
+```{r}
+## Create counts table for edger analysis
+all_samples_cts_edger <- counts(all_samples)
+
+# Save 
+saveRDS(all_samples_cts_edger, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/all_samples_cts_edger.rds")
+
+## Load SCRIPT and verified metadata 
+# Upload updated metadata from Rogan
+script_metadata <- read_rds("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/2022-04-25_SCRIPT_cytokines_metadata.rds") 
+
+# Upload verified dx and superinfection status revised by Ben
+dx_verification_3 <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/dx_verification_3.xlsx") 
+dx <- dx_verification_3 %>% 
+  dplyr::select(Sample_ID, pna_type_verified, Superinfection_verified) %>% 
+  dplyr::rename(tc_pt_study_id = Sample_ID)
+
+## Final metadata df
+script_metadata.2 <- left_join(script_metadata, dx, by = "tc_pt_study_id") 
+
+# Adjust binned and binary outcomes
+script_metadata.2$binned_outcome <- str_replace(script_metadata.2$binned_outcome, "Other", "Inpatient Facility")
+
+script_metadata_bulk <- script_metadata.2  %>% 
+  dplyr:: mutate(Outcome = case_when(stri_detect_fixed(binned_outcome, "Deceased") ~ "Deceased",
+                                     stri_detect_fixed(binned_outcome, "Home") ~ "Discharged",
+                                     stri_detect_fixed(binned_outcome, "Inpatient Facility") ~ "Discharged",
+                                     stri_detect_fixed(binned_outcome, "LTAC") ~ "Discharged",
+                                     TRUE  ~ "Default"))
+
+# No need for other adjustments done to FACS metadata since those samples not sequenced
+
+# Load original sequenced T cell BAL samples template (420 samples)
+tcell_samples_bulk <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/tcell_ms_allsamples.xlsx")
+tcell_samples_bulk <- tcell_samples_bulk %>% 
+  distinct()
+
+# Add sample ID column
+tcell_samples_bulk <- tcell_samples_bulk %>%
+  dplyr::mutate(sample_id = paste0("S", tcell_samples_bulk$tubeid))
+
+# Bulk RNA seq df with basic identifiers
+write.csv(tcell_samples_bulk, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/tcell_samples_bulk.csv")
+
+# Load RNA RiNe/concentration (initial metadata) info and join with sequenced samples (420 samples)
+tcell_rna <- read_excel("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/T_cell_samples_RNA.xlsx") 
+tcell_rna <- tcell_rna %>% 
+  distinct()
+
+tcell_samples_bulk_rna <- left_join(tcell_samples_bulk, tcell_rna, by = c("tubeid" = "tubeid", "tc_pt_study_id" = "tc_pt_study_id")) %>% 
+  dplyr::select(tc_pt_study_id, sample_id, tubeid, cell_type2, rin, rna_concentration) 
+
+# Merge with SCRIPT metadata
+tcell_samples_bulk_rna <- left_join(tcell_samples_bulk_rna, script_metadata_bulk, by = "tc_pt_study_id") %>%
+  distinct()
+
+tcell_samples_bulk_rna_unique <- tcell_samples_bulk_rna %>% 
+  distinct(tc_pt_study_id, .keep_all = T)
+```
+
+
+```{r}
+## Load QC data from Ziyou's nextflow folder
+QC_stat0<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_190924/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat1<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_200729/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat2<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_200803/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat3<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_200813/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat4<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_200819/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat5<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210310/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat6<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210311/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat7<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210329/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat8<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210401/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat9<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210416/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat10<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210419/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat11<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210716/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat12<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210719/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat13<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210816/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat14<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210817/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat15<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210823/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat16<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210824/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat17<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210830/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+QC_stat18<-read.delim('/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/nextflow/Nextflow_210831/results/multiqc/star_salmon/multiqc_data/multiqc_general_stats.txt')
+
+
+QC_all<-QC_stat0
+QC_all<-rbind(QC_all,QC_stat1)
+QC_all<-rbind(QC_all,QC_stat2)
+QC_all<-rbind(QC_all,QC_stat3)
+QC_all<-rbind(QC_all,QC_stat4)
+QC_all<-rbind(QC_all,QC_stat5)
+QC_all<-rbind(QC_all,QC_stat6)
+QC_all<-rbind(QC_all,QC_stat7)
+QC_all<-rbind(QC_all,QC_stat8)
+QC_all<-rbind(QC_all,QC_stat9)
+QC_all<-rbind(QC_all,QC_stat10)
+QC_all<-rbind(QC_all,QC_stat11)
+QC_all<-rbind(QC_all,QC_stat12)
+QC_all<-rbind(QC_all,QC_stat13)
+QC_all<-rbind(QC_all,QC_stat14)
+QC_all<-rbind(QC_all,QC_stat15)
+QC_all<-rbind(QC_all,QC_stat16)
+QC_all<-rbind(QC_all,QC_stat17)
+QC_all<-rbind(QC_all,QC_stat18)
+
+# Check for duplicates
+duplicated(QC_all$Sample)
+sum(duplicated(QC_all$Sample)) # 17 duplicates
+
+QC_all$Sample[duplicated(QC_all$Sample)] # Which samples?
+
+#  [1] "uRNA2"      "uRNA1"      "uRNA2"      "uRNA1"      "uRNA2"      "uRNA1"      "S360761072" "uRNA2"      "uRNA1"      "uRNA2"     
+# [11] "UhRNA"      "uRNA1"      "uRNA2"      "uRNA"       "uRNA"       "uRNA1"      "uRNA2"   
+# This is good and makes sense since sample S360761072 was run twice
+
+# Select uniquely mapped pct reads
+qc_all_pct <- QC_all %>% 
+  dplyr::select(1, 15) %>% 
+  distinct(Sample, .keep_all = T) %>% 
+  dplyr::rename(sample_id = Sample, mqc_mapped = STAR_mqc.generalstats.star.uniquely_mapped_percent)
+
+# Join with tcell_samples_bulk df
+tcell_samples_bulk_final <- left_join(tcell_samples_bulk_rna, qc_all_pct, by = "sample_id") %>% 
+  distinct()
+
+# Extract and add batch to metadata
+batches_tcells <- as.data.frame(colData( all_samples )[ ,c("sample", "batch") ] ) %>% 
+  dplyr::rename(sample_id = sample)
+
+tcell_samples_bulk_final <- left_join(tcell_samples_bulk_final, batches_tcells, by = "sample_id") %>% 
+  distinct()
+
+### Save final objects for downstream QC analysis 
+saveRDS(tcell_samples_bulk_final, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/tcell_samples_bulk_final.rds")
+
+# Add flow data for integrated downstream analysis
+tcell_samples_bulkfacs_final <- inner_join(tcell_samples_bulk_final, all_facs_samples, by = "tc_pt_study_id")
+
+
+# Upload Ct values from updated list from Egon
+egon_bal.2 <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/egon_bal.2.csv")
+
+egon_bal.2 <- egon_bal.2 %>% 
+  dplyr::select(tc_pt_study_id, Ct_N1)
+
+# Join
+tcell_samples_bulkfacs_final <- inner_join(tcell_samples_bulkfacs_final, egon_bal.2,  by = "tc_pt_study_id")
+
+# Save
+saveRDS(tcell_samples_bulkfacs_final, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/tcell_samples_bulkfacs_final.rds")
+
+write_csv(tcell_samples_bulkfacs_final, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/tcell_samples_bulkfacs_final.csv")
+```
+
+
+```{r}
+## CD8 T cell DEA with edgeR. Check QC metrics and remove outliers
+# Filter CD8 samples from metadata - 156 samples
+tcell_samples_bulk_final_cd8 <- tcell_samples_bulkfacs_final %>% 
+  filter(cell_type2 == "CD8")
+
+## Make sure samples match order between counts table and metadata
+# Which samples belong to CD8 from all counts table
+cd8_vec <- tcell_samples_bulk_final_cd8$sample_id[tcell_samples_bulk_final_cd8$sample_id %in% colnames(all_samples_cts_edger)]
+
+# Which order
+cd8_counts_ordered <- match(cd8_vec, colnames(all_samples_cts_edger))
+
+# Apply to matrix
+cd8_counts_ordered <- all_samples_cts_edger[, cd8_counts_ordered]
+
+# Order samples in metadata
+cd8_md_ordered <- match(cd8_vec, tcell_samples_bulk_final_cd8$sample_id)
+cd8_samples_ordered <- tcell_samples_bulk_final_cd8[cd8_md_ordered, ]
+
+# Verify
+cd8_samples_ordered$sample_id == colnames(cd8_counts_ordered)
+
+# Verify again
+sum(cd8_samples_ordered$sample_id != colnames(cd8_counts_ordered))
+```
+
+
+```{r}
+## Run edgeR 
+# Define groups by pna etiology
+group = factor(cd8_samples_ordered$pna_type_verified)
+
+# Define DGEList  
+edger_cd8 <- DGEList(counts = cd8_counts_ordered, group = group) 
+
+# Calculate normalization factors
+edger_cd8 <- calcNormFactors(edger_cd8)
+
+# Filtering 
+keep <- filterByExpr(edger_cd8)
+edger_cd8 <- edger_cd8[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_cd8$samples$lib.size <- colSums(edger_cd8$counts)
+
+# Vizualize library size
+barplot(edger_cd8$samples$lib.size*1e-6, 
+        names= 1:156, 
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL") +
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_cd8 <- calcNormFactors(edger_cd8)
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_cd8, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+# Get normalized gene counts for visualization and inspection of samples
+edger_cd8_norm <- cpm(edger_cd8, log = TRUE)
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+cd8_col <- c("red", "blue","orange","green")[group]
+points <- c(1,2,3,4)[group]
+plotMDS(edger_cd8, col = treg_col, gene.selection = "common") # add pch = points if want symbols instead of sample names
+
+# Plot library size
+cd8_cts_df <- data.frame(colSums(cd8_counts_ordered))  
+colnames(cd8_cts_df) <- "count"
+cd8_cts_df$sample <- factor(rownames(cd8_cts_df), 
+                            levels = rownames(cd8_cts_df)[order(cd8_cts_df$count)])
+
+ggplot(cd8_cts_df) + geom_col(aes(x = sample, y = count)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Plot library size after norm factors applied
+lib_size <- as.data.frame(edger_cd8$samples) %>% 
+  rownames_to_column("sample_id") 
+
+ggplot(lib_size) + geom_col(aes(x = reorder(sample_id, lib.size), y = lib.size)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Add rownames to md
+rownames(cd8_samples_ordered) <- cd8_samples_ordered$sample_id
+
+# Generate df to look at PCs for outliers (batch effect, low mapped reads) and genes of interest across samples
+cd8_cts_df2 <- plotMDS(edger_cd8, col = cd8_col, gene.selection = "common")  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  dplyr::select(sample_id, x, y) %>% 
+  dplyr::rename(PC1 = x, PC2 = y)
+
+# Plot library size on PCA
+cd8_cts_df2$count <- cd8_cts_df[cd8_cts_df2$sample, "count"]
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = log2(count))) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+# Plot mqc uniquely mapped reads (%) and batches
+mapped_reads <- cd8_samples_ordered %>% 
+  dplyr::select(sample_id, mqc_mapped, batch) 
+
+cd8_cts_df2 <- left_join(cd8_cts_df2, mapped_reads, by = "sample_id")
+
+# reads (many with low mapped reads
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = mqc_mapped)) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+# batches (no batch effect seen)
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = batch)) +
+  coord_fixed()
+
+
+# Check for outliers based on specific genes of interest (sex, T cells/Macrophage markers to check for potential sample swaps)
+cd8_cts_df2$foxp3 <- edger_cd8_norm["FOXP3", ]
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = foxp3)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df2$cd4 <- edger_cd8_norm["CD4", ]
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = cd4)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df2$cd8a <- edger_cd8_norm["CD8A", ] 
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = cd8a)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df2$c1qc <- edger_cd8_norm["C1QC", ]
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = c1qc)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df2$xist <- edger_cd8_norm["XIST", ]
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = xist)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df2$rps4y1 <- edger_cd8_norm["RPS4Y1", ]
+
+ggplot(cd8_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = rps4y1)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+# Join with putative gender
+putative_gender <- tcell_samples_bulk_final %>% 
+  dplyr::select(sample_id, gender)
+
+cd8_cts_df2 <- inner_join(cd8_cts_df2, putative_gender, by = "sample_id")
+
+# Sex mismatches: S360763018 putative gender male RNA female
+#                 S360780430 low for both (also checked EIF1AY). Likely low quality sample
+
+# PLot mapped reads to check for extreme oiutliers
+ggplot(cd8_cts_df2) +
+  geom_histogram(aes(x = mqc_mapped), bins = 50) # filter < 20 seems to remove outliers
+
+ggplot(cd8_cts_df2) +
+  geom_histogram(aes(x = foxp3), bins = 20)  # nothing to exclude just to observe
+
+ggplot(cd8_cts_df2) +
+  geom_histogram(aes(x = cd4), bins = 20) # filter > 7 seems to remove any potential outliers
+
+ggplot(cd8_cts_df2) +
+  geom_histogram(aes(x = c1qc), bins = 50) # filter > 6.5 seems to remove any potential outliers
+
+ggplot(cd8_cts_df2) +
+  geom_histogram(aes(x = cd8a), bins = 50) # filter < 7 seems to remove any potential outliers
+
+# Filter outlier and 1 sex mismatch sample
+cd8_out <- cd8_cts_df2 %>% 
+  dplyr::filter(mqc_mapped < 20 | cd4 > 7 | c1qc > 6.5 | cd8a < 7 | sample_id == "S360763018") 
+cd8_out_vec <- cd8_out$sample_id
+
+# 31 SAMPLES
+# [1] "S360753287" "S360762668" "S360780827" "S360796071" "S360796464" "S360800864" "S360780882" "S360796114" "S360779789"
+# [10] "S360761065" "S360779780" "S360762949" "S304020809" "S304016085" "S304020766" "S360753332" "S300311861" "S300291991"
+# [19] "S300291669" "S300311443" "S304017580" "S304011144" "S360760765" "S360762988" "S360800885" "S360763018" "S360780430"
+# [28] "S360780617" "S360753269" "S304018857" "S360763009"
+
+        
+# Remove selected samples
+cd8_counts_ordered_2 <- cd8_counts_ordered[, !colnames(cd8_counts_ordered) %in% cd8_out_vec]
+
+# Match order with metadata
+cd8_md_ordered <- match(colnames(cd8_counts_ordered_2), cd8_samples_ordered$sample_id)
+cd8_samples_ordered_2 <- cd8_samples_ordered[cd8_md_ordered, ]
+
+# Verify
+cd8_samples_ordered_2$sample_id == colnames(cd8_counts_ordered_2)
+
+# Verify again
+sum(cd8_samples_ordered_2$sample_id != names(cd8_counts_ordered_2))
+
+dim(cd8_samples_ordered_2) # 125
+
+# Save counts table
+write.csv(cd8_counts_ordered_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/cd8_counts.csv")
+
+# Make final for checking once more
+cd8_cts_df2_count <- cd8_cts_df2 %>% 
+  dplyr::select(sample_id, count)
+
+cd8_samples_ordered_2 <- left_join(cd8_samples_ordered_2, cd8_cts_df2_count, by = "sample_id")
+
+cd8_samples_ordered_2 <- as.data.frame(cd8_samples_ordered_2)
+```
+
+```{r}
+## edgeR run 2
+
+# Define groups
+group = factor(cd8_samples_ordered_2$pna_type_verified)
+
+# Define DGEList  
+edger_cd8_2 <- DGEList(counts = cd8_counts_ordered_2, group = group) 
+
+# Calculate normalization factors
+edger_cd8_2 <- calcNormFactors(edger_cd8_2)
+
+# Filtering 
+keep <- filterByExpr(edger_cd8_2)
+edger_cd8_2 <- edger_cd8_2[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_cd8_2$samples$lib.size <- colSums(edger_cd8_2$counts)
+
+# Vizualize library size
+barplot(edger_cd8_2$samples$lib.size*1e-6, 
+        names= 1:125,
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL") +
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_cd8_2 <- calcNormFactors(edger_cd8_2)
+
+# Save
+saveRDS(edger_cd8_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/edger_cd8_2.rds")
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_cd8_2, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+# Get normalized gene counts for visualization and inspection of samples
+edger_cd8_norm_2 <- cpm(edger_cd8_2, log = TRUE)
+
+# Save
+saveRDS(edger_cd8_norm_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/edger_cd8_norm_2.rds")
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+cd8_col <- c("red", "blue","orange","green")[group]
+points <- c(1,2,3,4)[group]
+plotMDS(edger_cd8_2, col = treg_col, gene.selection = "common") # add pch = points if want symbols instead of sample names
+
+
+# Plot library size
+cd8_cts_df <- data.frame(colSums(cd8_counts_ordered_2))  
+colnames(cd8_cts_df) <- "count"
+cd8_cts_df$sample <- factor(rownames(cd8_cts_df), 
+                            levels = rownames(cd8_cts_df)[order(cd8_cts_df$count)])
+
+ggplot(cd8_cts_df) + geom_col(aes(x = sample, y = count)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Plot library size after norm factors applied
+lib_size <- as.data.frame(edger_cd8_2$samples) %>% 
+  rownames_to_column("sample_id") 
+
+ggplot(lib_size) + geom_col(aes(x = reorder(sample_id, lib.size), y = lib.size)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Add rownames to md
+rownames(cd8_samples_ordered_2) <- cd8_samples_ordered_2$sample_id
+
+# Generate df to look for outliers and genes of interest across samples
+cd8_cts_df3 <- plotMDS(edger_cd8_2, col = cd8_col, gene.selection = "common")[c("x", "y", "distance.matrix.squared")] %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  dplyr::select(sample_id, x, y) %>% 
+  dplyr::rename(PC1 = x, PC2 = y)
+
+# Plot library sizes on PCA
+cd8_cts_df3$count <- cd8_cts_df[cd8_cts_df3$sample, "count"]
+
+ggplot(cd8_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = log2(count))) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+# Add mqc uniquely mapped reads %
+mapped_reads <- cd8_samples_ordered_2 %>% 
+  dplyr::select(sample_id, mqc_mapped) 
+
+cd8_cts_df3 <- left_join(cd8_cts_df3, mapped_reads, by = "sample_id")
+
+ggplot(cd8_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = mqc_mapped)) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+
+# Check for outliers based on specific genes of interest
+cd8_cts_df3$foxp3 <- edger_cd8_norm_2["FOXP3", ]
+
+ggplot(cd8_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = foxp3)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df3$cd4 <- edger_cd8_norm_2["CD4", ]
+
+ggplot(cd8_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = cd4)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df3$c1qc <- edger_cd8_norm_2["C1QC", ]
+
+ggplot(cd8_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = c1qc)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+cd8_cts_df3$cd8a <- edger_cd8_norm_2["CD8A", ]
+
+ggplot(cd8_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = cd8a)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+# Now global structure looks better with outliers and mismatches removed
+```
+
+```{r}
+## GLM approach 
+# Design matrix (+0 so this is used for pairwise comparisons, no intercept)
+design <- model.matrix(~ 0 + group, data = edger_cd8_2$samples)
+colnames(design) <- c("COVID", "NPC", "OP", "OVP")
+design
+
+
+# Estimating Dispersion, GLM
+#To estimate common dispersion and tagwise dispersions in one run (recommended):
+edger_cd8_2 <- estimateDisp(edger_cd8_2, design, robust=TRUE)
+
+# Plot BCV
+plotBCV(edger_cd8_2)
+
+# Perform GLM model fitting, a negative binomial generalized log-linear model to counts
+fit <- glmFit(edger_cd8_2, design, robust=TRUE) 
+
+# Make contrasts
+contrasts <- makeContrasts(
+  COVIDvsNPC = COVID - NPC,
+  COVIDvsOP = COVID - OP,
+  COVIDvsOVP = COVID - OVP,
+  NPCvsOP = NPC - OP,
+  NPCvsOVP = NPC - OVP,
+  OPvsOVP = OP - OVP,
+  COVIDvsALL = COVID - (NPC + OP + OVP)/3,
+  levels = design)
+
+
+## ANOVA-like testing 
+# Design matrix with intercept for ANOVA testing
+design_intercept <- model.matrix(~ group, data = edger_cd8_2$samples)
+
+# Estimate dispersion
+edger_cd8_intercept <- estimateDisp(edger_cd8_2, design_intercept, robust=TRUE)
+
+# Perform LRT method under GLM framework
+fit_intercept <- glmQLFit(edger_cd8_intercept, design_intercept, robust=TRUE)
+
+# Specify multiple coefficients
+edger_cd8_anova <- glmLRT(fit_intercept, coef = 2:4)
+topTags.cd8.anova <- topTags(edger_cd8_anova, n = Inf, adjust.method = "fdr") # get top DEG
+topTags.cd8.anova <- as.data.frame(topTags.cd8.anova)
+
+# Filter significant genes by FDR <0.05
+topTags.cd8.anova.fdr05 <- topTags.cd8.anova %>% 
+  filter(FDR < 0.05)
+
+# ANOVA contrast table
+logCPM_cd8 <- cpm(edger_cd8_intercept, prior.count = 2, log = TRUE)
+
+# Verify
+sum(cd8_samples_ordered_2$sample_id != colnames(logCPM_cd8))
+
+# Match
+rownames(logCPM_cd8) <- rownames(edger_cd8_intercept$counts)
+colnames(logCPM_cd8) <- cd8_samples_ordered_2$sample_id
+```
+
+```{r}
+## Let's visualize DEA
+# Get counts matrix
+cd8_logcpm <- logCPM_cd8[rownames(topTags.cd8.anova.fdr05), ]
+
+# Scale values (SD of 1 and mean of 0 aka beautiful gaussian normal distribution)
+cd8_logcpm <-  t(scale(t(cd8_logcpm))) 
+
+
+# Elbow method
+fviz_nbclust(cd8_logcpm, kmeans, method = "wss") +
+  geom_vline(xintercept = 2, linetype = 2) +
+  labs(subtitle = "Elbow method") 
+
+# K-means
+set.seed(8271)
+centers = 2
+cd8_logcpm_clusters <- as.data.frame(kmeans(x = cd8_logcpm,
+                                            centers = centers, 
+                                            iter.max = 1000, 
+                                            nstart = 500)$cluster)
+colnames(cd8_logcpm_clusters) <- "cluster"
+
+cd8_logcpm_clusters <- cd8_logcpm_clusters[order(cd8_logcpm_clusters$cluster), , drop = FALSE] # order clusters
+cd8_logcpm <- cd8_logcpm[rownames(cd8_logcpm_clusters), ] # reorder matrix to same order of genes
+
+gaps <- cumsum(table(cd8_logcpm_clusters))[1:centers] # where in plot you want gaps
+
+# Clinical metadata annotation
+cd8_samples_ordered_2$Diagnosis <- factor(cd8_samples_ordered_2$pna_type_verified,
+                                          levels = c("Non-pneumonia control", "Other pneumonia",
+                                                     "COVID-19", "Other viral pneumonia"))
+cd8_samples_ordered_2$Outcome <- factor(cd8_samples_ordered_2$Outcome,
+                                        levels = c("Discharged", "Deceased"))
+
+cd8_samples_ordered_2$Infection_status <- factor(cd8_samples_ordered_2$Superinfection_verified,
+                                                 levels = c("Primary Only", "Superinfection", "VAP"))
+
+# Add finite days and early samples flag
+cd8_samples_ordered_2$finite_day_of_intubation = cd8_samples_ordered_2$day_of_intubation
+cd8_samples_ordered_2$finite_day_of_intubation[is.infinite(cd8_samples_ordered_2$finite_day_of_intubation)] = NA
+
+# Annotation
+annotation_col <- cd8_samples_ordered_2 %>% 
+  dplyr::select(Diagnosis, Outcome,
+                'Infection status' = Infection_status,
+                'Days from intubation' = finite_day_of_intubation)
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha = HeatmapAnnotation(df = annotation_col,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+# Change row cluster order                       
+split = factor(cd8_logcpm_clusters$cluster, levels = c(2, 1))
+
+
+# Plot (Clustered)
+set.seed(8271)
+cd8_rna_md <- Heatmap(mat = cd8_logcpm,
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = TRUE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = FALSE,
+               column_split = 2,
+               split = split,
+               column_title = "CD8 T cells samples",
+               row_title = "Differentially expressed genes (975)",
+               row_gap = unit(1.5, "mm"),
+               column_gap = unit(1.5, "mm"),
+                row_names_gp = gpar(fontface="italic"),
+               top_annotation = ha, 
+               # right_annotation = ha2,
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd8_rna_md 
+
+cd8_rna_md  <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd8_rna_md, 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd8_rna_md 
+
+# Save PDF
+# pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/cd8_rna_md.pdf", width=14, height=8)
+# print(cd8_rna_md)
+# dev.off()
+```
+
+```{r}
+# Plot (Unclustered)
+# Modify values for Ct > 40
+cd8_samples_ordered_2$Ct_N1 <- str_replace(cd8_samples_ordered_2$Ct_N1, "Undetermined", "50")
+
+cd8_samples_ordered_2$Ct_N1 <- as.numeric(cd8_samples_ordered_2$Ct_N1)     
+
+# Annotation
+annotation_col2 <- cd8_samples_ordered_2 %>% 
+  dplyr::select(Diagnosis, 
+                'COVID-19 PCR' = COVID_19,
+                Ct = Ct_N1,
+                Outcome,
+                'Infection status' = Infection_status,
+                 finite_day_of_intubation) %>% 
+  arrange(Diagnosis, finite_day_of_intubation) %>% 
+  dplyr::rename('Days from intubation' = finite_day_of_intubation)
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha2 = HeatmapAnnotation(df = annotation_col2,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                        'COVID-19 PCR'= c("Positive" = antigen_pal2[11],
+                                            "Negative" = antigen_pal2[15]),
+                        Ct = colorRamp2(c(0,10,20,30,35,40,45,50), hcl_palette = "Blues2"),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                             'COVID-19 PCR'  = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                             Ct  = list(
+                               at = c(0,10,20,30,40,50),
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+# Column split
+column_split = rep("Non-pneumonia control", 125)
+column_split[16:30] = "Other pneumonia"
+column_split[31:102] = "COVID-19"
+column_split[103:125] = "Other viral pneumonia"
+cs <- as.data.frame(column_split)
+
+cs$column_split <- factor(cs$column_split, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot
+set.seed(8271)
+cd8_rna_unclust.2 <- Heatmap(mat = cd8_logcpm[, rownames(annotation_col2)], 
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = FALSE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = FALSE,
+               top_annotation = ha2,
+               row_km = 2,
+               row_title = "Differentially expressed genes (975)",
+               column_split = cs$column_split,
+               column_title = NULL,
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+cd8_rna_unclust.2 
+
+cd8_rna_unclust   <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(cd8_rna_unclust , 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+cd8_rna_unclust 
+
+# Save PDF
+# pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/cd8_rna_unclust.2.pdf", width=14, height=8)
+# print(cd8_rna_unclust.2)
+# dev.off()
+```
+
+```{r}
+# Save cd8 df with anonymized pt/sample id
+cd8_rna_md <- cd8_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, study_id, cell_type2, sample_id, age, gender, Diagnosis, Outcome, Infection_status, day_of_intubation) %>% 
+  remove_rownames()
+
+cd8_rna_metadata <- inner_join(cd8_rna_md, allu_rna_id_anonym, by = "study_id") %>% 
+  dplyr::select(-study_id)
+
+# Add anonymized pt/sample id
+cd8_rna_metadata <- cd8_rna_metadata %>% 
+  dplyr::mutate(anonym_pt_study_id = gsub("^[^-]+", "", cd8_rna_metadata$tc_pt_study_id))
+  
+cd8_rna_metadata$Anonymized_pt_study_id <- paste(cd8_rna_metadata$Anonymized_id, cd8_rna_metadata$anonym_pt_study_id) 
+
+cd8_rna_metadata_final <- cd8_rna_metadata %>% 
+  dplyr::select(Anonymized_id, Anonymized_pt_study_id, Sample = sample_id, Cell = cell_type2, Diagnosis, Age = age, Sex = gender, Outcome, 'Infection status' = Infection_status, 'Days from intubation' = day_of_intubation)
+  
+# Save metadata
+write.csv(cd8_rna_metadata_final, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/cd8_rna_metadata_final.csv")
+```
+
+```{r}
+## Extract genes per cluster from k-means CLUSTERED figure
+# Load anno_mart
+anno_mart <- readRDS("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/anno_mart.rds")
+
+kmeans_genes_cd8_edger <- topTags.cd8.anova.fdr05[rownames(cd8_logcpm_clusters),]
+kmeans_genes_cd8_edger$cluster <- cd8_logcpm_clusters[rownames(kmeans_genes_cd8_edger), "cluster"]
+
+kmeans_genes_cd8_edger <- kmeans_genes_cd8_edger %>% 
+  rownames_to_column("gene_name")
+
+anno_match <- match(kmeans_genes_cd8_edger$gene_name, anno_mart$external_gene_name)
+kmeans_genes_cd8_edger$gene<-anno_mart[anno_match,'ensembl_gene_id']
+kmeans_genes_cd8_edger$description<-anno_mart[anno_match,'description']
+
+write.csv(kmeans_genes_cd8_edger, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/kmeans_genes_cd8_edger.csv")
+# 975 genes
+
+## Filter by cluster for downstream topGO analysis
+# Cluster 1 (380 genes) -- Reordered to cluster 2 in plot
+kmeans_genes_cd8_edger_1 <- kmeans_genes_cd8_edger %>% 
+  filter(cluster == 1)
+write.csv(kmeans_genes_cd8_edger_1, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/kmeans_genes_cd8_edger_1.csv")
+
+# Cluster 2 (595) -- Reordered to cluster 1 in plot
+kmeans_genes_cd8_edger_2 <- kmeans_genes_cd8_edger %>% 
+  filter(cluster == 2)
+write.csv(kmeans_genes_cd8_edger_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/kmeans_genes_cd8_edger_2.csv")
+```
+
+
+```{r}
+## TopGO Analysis 
+# Cluster 1
+# Gene universe as all genes detected in dataset
+all_cd8_genes <- row.names(edger_cd8_norm_2)
+write.csv(all_cd8_genes, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/all_cd8_genes.csv")
+
+# Genes of interest
+interest_cd8_genes_1 <- kmeans_genes_cd8_edger_1$gene_name
+write.csv(interest_cd8_genes_1, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/interest_cd8_genes_1.csv")
+
+# Gene-to-GO annotation list 
+gene_2_GO = unstack(anno_mart[, c(1,2)])
+
+# Remove any genes without GO annotation
+keep = interest_cd8_genes_1 %in% anno_mart[ ,2]
+keep = which(keep == TRUE)
+interest_cd8_genes_1 = interest_cd8_genes_1[keep]
+
+# Factor genes of interest (1 = selected, 0 = not selected in topGO)
+geneList = factor(as.integer(all_cd8_genes %in% interest_cd8_genes_1))
+names(geneList) = all_cd8_genes
+geneList
+
+# Build topGO object
+go_data_cd8.1 = new("topGOdata", 
+              ontology = "BP", 
+              allGenes = geneList,
+              annot = annFUN.gene2GO, 
+              gene2GO = gene_2_GO)
+ 
+# Run Fisher test
+classic_fisher_result = runTest(go_data_cd8.1, algorithm ='classic', statistic ='fisher')
+
+# Generate Gentable
+allGO = usedGO(go_data_cd8.1)
+results_cd8_1_fis = GenTable(go_data_cd8.1, 
+                    classicFisher=classic_fisher_result, 
+                    orderBy = 'classicFisher',
+                    topNodes = length(allGO)) %>% 
+      dplyr::mutate(padj = p.adjust(classicFisher, method = "fdr"),
+             fold_enrichment = Significant / Expected,
+             term_coverage = Significant / Annotated) %>% 
+      dplyr::filter(padj < 0.05)
+
+# Save
+write.csv(results_cd8_1_fis, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/results_cd8_1_fis.csv")
+
+# Get all the genes in your significant GO TERMS
+myterms = results_cd8_1_fis$GO.ID
+mygenes = genesInTerm(go_data, myterms)
+
+var=c()
+for (i in 1:length(myterms))
+{
+  myterm=myterms[i]
+  mygenesforterm= mygenes[myterm][[1]]
+  mygenesforterm=paste(mygenesforterm, collapse=',')
+  var[i]=paste("GOTerm",myterm,"genes-",mygenesforterm)
+}
+
+write.csv(var,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/genetoGOmapping_cd8_1.csv")
+```
+
+```{r}
+## Visualize Go terms with rrvgo package
+simMatrix_cd8.1 <- calculateSimMatrix(results_cd8_1_fis$GO.ID,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+
+# Group terms according to similarity
+scores <- setNames(results_cd8_1_fis$padj, results_cd8_1_fis$GO.ID)
+reducedTerms_cd8.1 <- reduceSimMatrix(simMatrix_cd8.1,
+                                scores,
+                                threshold=0.5,
+                                orgdb="org.Hs.eg.db")
+
+# Palette
+pal = pal_d3()(10)
+term_colors = colorRampPalette(pal_d3("category10")(10))(57)
+#shuffle a bit
+set.seed(8271)
+term_colors = sample(term_colors, 57)
+
+
+# Have to run scatterPlot schema manually, function is not good. Rogan caught this issue
+PCoA_cd8.1 = cmdscale(as.matrix(as.dist(1 - simMatrix_cd8.1)), eig = TRUE, k = 2) 
+rrvgo_cd8.1 = cbind(as.data.frame(PCoA_cd8.1$points), 
+              reducedTerms_cd8.1[match(rownames(PCoA_cd8.1$points), reducedTerms_cd8.1$go), 
+                           c("term", "parent", "parentTerm", "score")]) %>% 
+  dplyr::rename(PCo1 = V1, PCo2 = V2)
+
+# Save
+write.csv(rrvgo_cd8.1, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/rrvgo_cd8.1.csv")
+
+
+# Plot
+rrvgo_plot_cd8.1 = ggplot(rrvgo_cd8.1, aes(x = PCo1, y = PCo2, color = parentTerm)) +
+  geom_point(aes(size = score), alpha = 0.5) +
+   geom_label_repel(aes(label = parentTerm),
+                    data = rrvgo_cd8.1[c(41,39,38,37,35,29,20,3,4), ],
+                    max.overlaps = Inf, force = 100, force_pull = 100,
+                    # nudge_x = 0.1,
+                    nudge_y = 0.07,
+                    box.padding = 1,
+                    size = 3.5, min.segment.length = 1,
+                    direction = "both",
+                    segment.curvature = 0.15) +
+    theme(text = element_text(family = "Arial"),
+        title = element_text(size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=10, vjust= 0, hjust = 0.5)) +
+  scale_color_manual(values = term_colors) +
+  scale_size_continuous(range = c(0, 15)) +
+  theme_bw() +
+  theme(legend.position="none") +
+    labs(title="Significant gene ontology parent terms, cluster 1 (CD8 T cells)", 
+       x="Semantic Space PC1",
+       y="Semantic Space PC2")
+
+rrvgo_plot_cd8.1
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/rrvgo_plot_cd8.1.pdf", width=14, height=8)
+print(rrvgo_plot_cd8.1)
+dev.off()
+```
+
+
+```{r}
+# Cluster 2
+# Gene universe as all genes detected in dataset
+all_cd8_genes <- row.names(edger_cd8_norm_2)
+
+# Genes of interest
+interest_cd8_genes_2 <- kmeans_genes_cd8_edger_2$gene_name
+# write.csv(interest_cd8_genes_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/interest_cd8_genes_2.csv")
+
+# Gene-to-GO annotation list 
+gene_2_GO = unstack(anno_mart[, c(1,2)])
+
+# Remove any genes without GO annotation
+keep = interest_cd8_genes_2 %in% anno_mart[ ,2]
+keep = which(keep == TRUE)
+interest_cd8_genes_2 = interest_cd8_genes_2[keep]
+
+# Factor genes of interest (1 = selected, 0 = not selected in topGO)
+geneList = factor(as.integer(all_cd8_genes %in% interest_cd8_genes_2))
+names(geneList) = all_cd8_genes
+geneList
+
+# Build topGO object
+go_data_cd8.2 = new("topGOdata", 
+              ontology = "BP", 
+              allGenes = geneList,
+              annot = annFUN.gene2GO, 
+              gene2GO = gene_2_GO)
+ 
+# Run Fisher test
+classic_fisher_result = runTest(go_data_cd8.2, algorithm ='classic', statistic ='fisher')
+
+# Generate Gentable
+allGO = usedGO(go_data_cd8.2)
+results_cd8_2_fis = GenTable(go_data_cd8.2, 
+                    classicFisher=classic_fisher_result, 
+                    orderBy = 'classicFisher',
+                    topNodes = length(allGO)) %>% 
+      dplyr::mutate(padj = p.adjust(classicFisher, method = "fdr"),
+             fold_enrichment = Significant / Expected,
+             term_coverage = Significant / Annotated) %>% 
+      dplyr::filter(padj < 0.05)
+
+# Save
+write.csv(results_cd8_2_fis, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/results_cd8_2_fis.csv")
+
+# Get all the genes in your significant GO TERMS
+myterms = results_cd8_2_fis$GO.ID
+mygenes = genesInTerm(go_data, myterms)
+
+var=c()
+for (i in 1:length(myterms))
+{
+  myterm=myterms[i]
+  mygenesforterm= mygenes[myterm][[1]]
+  mygenesforterm=paste(mygenesforterm, collapse=',')
+  var[i]=paste("GOTerm",myterm,"genes-",mygenesforterm)
+}
+
+write.csv(var,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/genetoGOmapping_cd8_2.csv")
+```
+
+```{r}
+## Visualize Go terms with rrvgo
+simMatrix_cd8.2 <- calculateSimMatrix(results_cd8_2_fis$GO.ID,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+
+# Group terms according to similarity
+scores <- setNames(results_cd8_2_fis$padj, results_cd8_2_fis$GO.ID)
+reducedTerms_cd8.2 <- reduceSimMatrix(simMatrix_cd8.2,
+                                scores,
+                                threshold=0.5,
+                                orgdb="org.Hs.eg.db")
+
+# Palette
+pal = pal_d3()(10)
+term_colors = colorRampPalette(pal_d3("category10")(10))(263)
+#shuffle a bit
+set.seed(0311)
+term_colors = sample(term_colors, 263)
+
+
+#have to run scatterPlot schema manually, function is not good
+PCoA_cd8.2 = cmdscale(as.matrix(as.dist(1 - simMatrix_cd8.2)), eig = TRUE, k = 2) 
+rrvgo_cd8.2 = cbind(as.data.frame(PCoA_cd8.2$points), 
+              reducedTerms_cd8.2[match(rownames(PCoA_cd8.2$points), reducedTerms_cd8.2$go), 
+                           c("term", "parent", "parentTerm", "score")]) %>% 
+  dplyr::rename(PCo1 = V1, PCo2 = V2)
+# 
+# # Save
+write.csv(rrvgo_cd8.2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/rrvgo_cd8.2.csv")
+
+
+# Plot
+rrvgo_plot_cd8.2 = ggplot(rrvgo_cd8.2, aes(x = PCo1, y = PCo2, color = parentTerm)) +
+  geom_point(aes(size = score), alpha = 0.5) +
+   geom_label_repel(aes(label = parentTerm),
+                    data = rrvgo_cd8.2[c(255,247,244,243,242,238,231,225,223,218,205,187,180,178,177), ],
+                    max.overlaps = Inf, force = 100, force_pull = 100,
+                    # nudge_x = 0.1,
+                    nudge_y = 0.7,
+                    box.padding = 1,
+                    size = 3.5, min.segment.length = 1,
+                    direction = "both",
+                    segment.curvature = 0.15) +
+    theme(text = element_text(family = "Arial"),
+        title = element_text(size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=10, vjust= 0, hjust = 0.5)) +
+  scale_color_manual(values = term_colors) +
+  scale_size_continuous(range = c(0, 15)) +
+  theme_bw() +
+  theme(legend.position="none") +
+    labs(title="Significant gene ontology parent terms, cluster 2 (CD8 T cells)", 
+       x="Semantic Space PC1",
+       y="Semantic Space PC2")
+
+rrvgo_plot_cd8.2
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/rrvgo_plot_cd8.2.pdf", width=14, height=8)
+print(rrvgo_plot_cd8.2)
+dev.off()
+```
+
+
+```{r}
+## Let's explore pairwise comparisons
+# COVID vs ALL other pneumonias (940 genes)
+covid_vs_all_cd8 <- glmLRT(fit, contrast = contrasts[, "COVIDvsALL"])
+topTags_covid_vs_all_cd8 <- topTags(covid_vs_all_cd8, n = Inf, adjust.method = "fdr")
+topTags_covid_vs_all_cd8 <- as.data.frame(topTags_covid_vs_all_cd8) %>% 
+  rownames_to_column("gene_name")
+
+topTags_covid_vs_all_cd8_fdr05 <- topTags_covid_vs_all_cd8 %>% 
+  filter(FDR < 0.05) # 900 DEG
+
+write.csv(topTags_covid_vs_all_cd8_fdr05,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_covid_vs_all_cd8_fdr05.csv")
+
+## GSEA
+# Obtain gene list
+genes_covid_vs_all_cd8 <- topTags_covid_vs_all_cd8 %>% 
+  dplyr::select(gene_name, logFC) %>% 
+  dplyr::group_by(logFC) %>% 
+  dplyr::arrange(desc(logFC)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- genes_covid_vs_all_cd8$logFC 
+names(gene_list) <- genes_covid_vs_all_cd8$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+# Obtain go files to explore
+go_file_immuno <- gmtPathways("./c7.all.v7.5.1.symbols.gmt")
+go_file_h <- gmtPathways("./h.all.v7.5.1.symbols.gmt")
+
+# Run fgsea analysis
+fgseaRes_cd8_h <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+                  as.data.frame() %>% 
+                  dplyr::filter(padj < 0.25) %>%
+                  arrange(desc(NES)) %>% 
+                  dplyr::rename(Count = size)
+
+# Label
+fgseaRes_cd8_h$Enrichment = ifelse(fgseaRes_cd8_h$NES > 0, "Upregulated", "Downregulated") 
+fgseaRes_cd8_h$Enrichment <- factor(fgseaRes_cd8_h$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+# Save
+# write.csv(fgseaRes_cd8_h, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_h.csv")
+# write.table(fgseaRes_cd8_h, file = "./projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_h.txt", row.names = T, sep = "\t", quote = F) 
+
+# Plot NES
+gsea_cd8_h <- ggplot(fgseaRes_cd8_h, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "COVID-19 vs Non-COVID-19\npneumonia etiologies (CD8 T cells)") 
+
+gsea_cd8_h
+
+# Save as PDF
+ggsave(gsea_cd8_h, filename = "gsea_cd8_h.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+# pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/gsea_cd8_h.pdf", width=16, height=10)
+# print(gsea_cd8_h)
+# dev.off()
+```
+
+```{r}
+## Let's explore pairwise comparisons
+# COVID vs OVP 
+covid_vs_ovp_cd8 <- glmLRT(fit, contrast = contrasts[, "COVIDvsOVP"])
+topTags_covid_vs_ovp_cd8 <- topTags(covid_vs_ovp_cd8, n = Inf, adjust.method = "fdr")
+topTags_covid_vs_ovp_cd8 <- as.data.frame(topTags_covid_vs_ovp_cd8) %>% 
+  rownames_to_column("gene_name")
+
+topTags_covid_vs_ovp_cd8_fdr05 <- topTags_covid_vs_ovp_cd8 %>%  # 364
+  filter(FDR < 0.05)
+
+write.csv(topTags_covid_vs_ovp_cd8_fdr05,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_covid_vs_all_cd8_fdr05.csv")
+
+## GSEA
+# Obtain gene list
+genes_covid_vs_ovp_cd8 <- topTags_covid_vs_ovp_cd8 %>% 
+  dplyr::select(gene_name, logFC) %>% 
+  dplyr::group_by(logFC) %>% 
+  dplyr::arrange(desc(logFC)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- genes_covid_vs_ovp_cd8$logFC 
+names(gene_list) <- genes_covid_vs_ovp_cd8$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+# Obtain go files to explore
+go_file_immuno <- gmtPathways("./c7.all.v7.5.1.symbols.gmt")
+go_file_h <- gmtPathways("./h.all.v7.5.1.symbols.gmt")
+
+# Run fgsea analysis
+fgseaRes_cd8_ovp_h <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+                  as.data.frame() %>% 
+                  dplyr::filter(padj < 0.25) %>%
+                  arrange(desc(NES)) %>% 
+                  dplyr::rename(Count = size)
+
+# Label
+fgseaRes_cd8_ovp_h$Enrichment = ifelse(fgseaRes_cd8_ovp_h$NES > 0, "Upregulated", "Downregulated") 
+fgseaRes_cd8_ovp_h$Enrichment <- factor(fgseaRes_cd8_ovp_h$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+# # Save
+# write.csv(fgseaRes_cd8_ovp_h, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_ovp_h.csv")
+# write.table(fgseaRes_cd8_ovp_h, file = "./projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_ovp_h.txt", row.names = T, sep = "\t", quote = F) 
+
+# Plot NES
+gsea_cd8_ovp_h <- ggplot(fgseaRes_cd8_ovp_h, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 12, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "COVID-19 vs Other\nviral pneumonia (CD8 T cells)") 
+
+gsea_cd8_ovp_h + theme(legend.position="bottom", legend.direction = 'vertical')
+
+
+# Save as PDF
+ggsave(gsea_cd8_ovp_h, filename = "gsea_cd8_ovp_h.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+
+
+```{r}
+## Correlation between gene expression programs in CD8 T cells from COVID-19 pts with clinical variables
+# Add elder status
+cor_rna_cd8 <- cd8_samples_ordered_2 %>%
+  dplyr::mutate(Elder_status = ifelse(age < 65, "≤ 65 years-old", "> 65 years-old"))
+
+# Arrange metadata for binary outcomes
+cor_rna_cd8 <- cor_rna_cd8 %>% 
+  dplyr::mutate(Deceased = ifelse(Outcome == "Deceased", 1, 0),
+                Discharged = ifelse(Outcome == "Discharged", 1, 0),
+                Elder = ifelse(Elder_status == "> 65 years-old", 1, 0),
+                Superinfection = ifelse( Superinfection_verified =="Superinfection" | Superinfection_verified == "VAP", 1, 0),
+                pt_id = substr(tc_pt_study_id, 1,4)
+  )
+
+# Select medication and comorbidities variables of interest from Cathy's table
+bal_meds <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/Luisa_meds_bal.csv") %>% 
+  dplyr::select(pt_id = patient, 
+                'Cumulative steroids dose' = cumulative_pred_equiv_during_admission, 
+                'Steroids' = received_steroids_during_admission,
+                'Tocilizumab' = received_tocilizumab_during_admission, 
+                'Remdesivir' = received_remdesivir_during_admission)
+
+bal_comor <- read_csv("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/FACS/Luisa_comorbidities_bal.csv") %>% 
+  dplyr::select(pt_id = patient, Diabetes, 'COPD' = Chronic_pulmonary_disease, 'CHF' = Congestive_heart_failure,
+                Cancer, 'Immunocompromised' = Imuunocompromised_flag, 
+                'Cerebrovascular disease' = Cerebrovascular_disease, 'PVD' = Peripheral_vascular_disease, 
+                'Renal disease' = Renal_disease, 'Liver disease' = Liver_disease)
+
+# Join
+bal_vars <- left_join(bal_meds, bal_comor, by = "pt_id")
+bal_vars$pt_id <- as.character(bal_vars$pt_id)
+
+
+# Create final metadata table 
+cor_rna_cd8_mdf <- left_join(cor_rna_cd8, bal_vars, by = "pt_id") %>% 
+  dplyr::filter(Diagnosis == "COVID-19") %>% 
+  dplyr::select(sample_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased, Discharged, Superinfection,
+                'SOFA'= mean_sofa, BMI,
+                'WBC'= WHITE_BLOOD_CELL_COUNT,'Neutrophils (blood)' = Absolute_Neutrophils,
+                'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                'CRP' = C_Reactive_Protein, LDH,'CK' = CREATINE_KINASE_TOTAL, 'Procalcitonin' = PROCALCITONIN, 'Ferritin' = FERRITIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER,                  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,
+                'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 'Days on MV'  = finite_day_of_intubation,
+                'Steroids', 'Tocilizumab', 'Remdesivir', Diabetes, 'COPD', 'Immunocompromised') 
+
+```
+
+```{r}
+# Extract COVID samples from counts matrix and match to md 
+cor_cd8_vec <- cor_rna_cd8_mdf$sample_id[cor_rna_cd8_mdf$sample_id %in% colnames(cd8_logcpm)]
+  
+# Which order
+cor_cd8_vec_ord <- match(cor_cd8_vec , colnames(cd8_logcpm))
+  
+# Apply to matrix
+cor_cd8_vec_ord <- cd8_logcpm[, cor_cd8_vec_ord]
+  
+# Order samples in metadata
+cor_cd8_vec_ord_md <- match(cor_cd8_vec, cor_rna_cd8_mdf$sample_id)
+cor_cd8_ordered_samples <- cor_rna_cd8_mdf[cor_cd8_vec_ord_md, ]
+  
+# Verify
+cor_cd8_ordered_samples$sample_id == colnames(cor_cd8_vec_ord)
+  
+# Verify again
+sum(cor_cd8_ordered_samples$sample_id != colnames(cor_cd8_vec_ord))
+  
+# Transpose
+cor_cd8_ordered_samples_t <- as.data.frame(t(cor_cd8_ordered_samples), stringsAsFactors = FALSE) %>%
+  row_to_names(row_number = 1)
+cor_cd8_ordered_samples_t[] <- lapply(cor_cd8_ordered_samples_t, type.convert, as.is = TRUE)
+
+
+# Correlation
+cor_cd8 <- cor(t(cor_cd8_vec_ord), t(cor_cd8_ordered_samples_t), use = "pairwise.complete.obs", method = "spearman")
+
+write.csv(cor_cd8, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/cor_cd8.csv")
+
+# Visualize
+ hist(cor_cd8)
+# Gaussian distribution like Nik predicted it would be!
+
+# Add genes
+cor_cd8 <- as.data.frame(cor_cd8)
+
+gsea_cor_cd8_matrix <- cor_cd8 %>% 
+  rownames_to_column(var = "gene_name")
+
+# Visualize with density for figure
+cor_cd8_viz <- data.frame(rho=unlist(cor_cd8))
+cd8_dense <- ggplot(cor_cd8_viz, aes(x=rho)) +
+  geom_density(color = "#91D1C299", fill = "#91D1C299", alpha = 0.3, lwd = 1) +
+  geom_vline(xintercept=c(-0.3, 0.3), linetype = "longdash") +
+  theme_classic() +
+  # scale_x_continuous(breaks=seq(-0.6,0.6)) +
+  # xlim(-1,1) +
+      theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Spearman (rho)", 
+       y = "Gene Density",
+       title = "Clinical variable") 
+
+cd8_dense
+
+# # Save as PDF
+ggsave(cd8_dense, filename = "cd8_dense.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 6, units = "in")
+```
+
+```{r}
+# Plot for outcome
+cor_cd8_outcome <- cor_cd8 %>% 
+  dplyr::select(Discharged, Deceased) 
+
+# Pivot
+cor_cd8_outcome2 <- cor_cd8_outcome %>% 
+  pivot_longer(cols = Discharged:Deceased,
+               names_to = "Outcome",
+               values_to = "rho") 
+
+cor_cd8_outcome2$Outcome <- factor(cor_cd8_outcome2$Outcome, levels = c("Discharged", "Deceased"))
+
+
+
+cor_cd8_viz2 <- data.frame(rho=unlist(cor_cd8_outcome))
+cd8_dense_out_plot <- ggplot(cor_cd8_outcome2 , aes(x= rho, fill = Outcome, color = Outcome)) +
+  geom_density(alpha = 0.3, lwd = 1) +
+  scale_fill_manual(values =
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+    scale_color_manual(values =
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  geom_vline(xintercept=c(-0.3, 0.3), linetype = "longdash") +
+  theme_classic() +
+  # scale_x_continuous(breaks=seq(-0.6,0.6)) +
+  # xlim(-1,1) +
+      theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Spearman (rho)", 
+       y = "Gene Density",
+       title = "Clinical variable") 
+
+cd8_dense_out_plot
+
+# Plot
+ggsave(cd8_dense_out_plot, filename = "cd8_dense_out_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 8, height = 6, units = "in")
+```
+
+```{r}
+# Create final metadata table 
+cor_rna_cd8_md_inf <- left_join(cor_rna_cd8, bal_vars, by = "pt_id") %>% 
+  dplyr::filter(Diagnosis == "COVID-19" & Infection_status == "Superinfection") %>% 
+  dplyr::select(sample_id, 'Age'= age, 'Elder (> 65 years-old)' = Elder, Deceased, Discharged, Superinfection,
+                'SOFA'= mean_sofa, BMI,
+                'WBC'= WHITE_BLOOD_CELL_COUNT,'Neutrophils (blood)' = Absolute_Neutrophils,
+                'Lymphocytes (blood)' = ABSOLUTE_LYMPHOCYTES, 'Eosinophils (blood)' = ABSOLUTE_EOSINOPHILS, 
+                'CRP' = C_Reactive_Protein, LDH,'CK' = CREATINE_KINASE_TOTAL, 'Procalcitonin' = PROCALCITONIN, 'Ferritin' = FERRITIN, 'Troponin' = TROPONIN_I, Creatinine,'AST' = AST_SGOT, 'D-dimer' = D_DIMER,                  FiO2, PEEP, 'P/F' = PF_ratio, 'Respiratory system compliance' = Static_Compliance,
+                'Driving pressure' =  driving_pressure, 'Vte' = Exhaled_Vt_mL, 
+                'Arterial PH' = PH_ART, 'PaO2' = PO2_ART, 'PaCO2' = PCO2_ART,'HCO3' =  HCO3_ART, 'Days on MV'  = finite_day_of_intubation,
+                'Steroids', 'Tocilizumab', 'Remdesivir', Diabetes, 'COPD', 'Immunocompromised') 
+
+# Extract COVID samples from counts matrix and match to md 
+cor_cd8_vec_inf <- cor_rna_cd8_md_inf$sample_id[cor_rna_cd8_md_inf$sample_id %in% colnames(cd8_logcpm)]
+  
+# Which order
+cor_cd8_vec_ord_inf <- match(cor_cd8_vec_inf , colnames(cd8_logcpm))
+  
+# Apply to matrix
+cor_cd8_vec_ord_inf <- cd8_logcpm[, cor_cd8_vec_ord_inf]
+  
+# Order samples in metadata
+cor_cd8_vec_ord_md_inf <- match(cor_cd8_vec_inf, cor_rna_cd8_md_inf$sample_id)
+cor_cd8_ordered_samples_inf <- cor_rna_cd8_md_inf[cor_cd8_vec_ord_md_inf, ]
+  
+# Verify
+cor_cd8_ordered_samples_inf$sample_id == colnames(cor_cd8_vec_ord_inf)
+  
+# Verify again
+sum(cor_cd8_ordered_samples_inf$sample_id != colnames(cor_cd8_vec_ord_inf))
+  
+# Transpose
+cor_cd8_ordered_samples_inf_t <- as.data.frame(t(cor_cd8_ordered_samples_inf), stringsAsFactors = FALSE) %>%
+  row_to_names(row_number = 1)
+cor_cd8_ordered_samples_inf_t[] <- lapply(cor_cd8_ordered_samples_inf_t, type.convert, as.is = TRUE)
+
+
+# Correlation
+cor_cd8_inf <- cor(t(cor_cd8_vec_ord_inf), t(cor_cd8_ordered_samples_inf_t), use = "pairwise.complete.obs", method = "spearman")
+
+# Add genes
+cor_cd8_inf <- as.data.frame(cor_cd8_inf)
+
+gsea_cor_cd8_matrix_inf <- cor_cd8_inf %>% 
+  rownames_to_column(var = "gene_name")
+```
+
+```{r}
+## Look at days on MV variable
+# Obtain gene list
+gsea_cor_cd8_mv <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, `Days on MV`) %>% 
+  dplyr::arrange(desc(`Days on MV`)) %>% 
+  ungroup() 
+
+
+# Create numeric vector of rank genes based on correlation
+gene_list <- gsea_cor_cd8_mv$`Days on MV`
+names(gene_list) <- gsea_cor_cd8_mv$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+# Run fgsea analysis
+gsea_cor_cd8_mv <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>%
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+
+# Label
+gsea_cor_cd8_mv$Enrichment = ifelse(gsea_cor_cd8_mv$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_mv$Enrichment <- factor(gsea_cor_cd8_mv$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+
+# Plot NES
+gsea_cor_cd8_h_mv <- ggplot(gsea_cor_cd8_mv, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "Days on mechanical ventilation") 
+
+gsea_cor_cd8_h_mv
+
+# Save as PDF
+ggsave(gsea_cor_cd8_h_mv, filename = "gsea_cor_cd8_h_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+```{r}
+## Respiratory system compliance variable
+# Obtain gene list
+gsea_cor_cd8_rcs <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, 'Respiratory system compliance') %>% 
+  dplyr::arrange(desc(`Respiratory system compliance`))
+
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- gsea_cor_cd8_rcs$'Respiratory system compliance'
+names(gene_list) <- gsea_cor_cd8_rcs$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+# Obtain go files to explore
+# go_file_h <- gmtPathways("./h.all.v7.5.1.symbols.gmt")
+
+# Run fgsea analysis
+gsea_cor_cd8_rcs <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+# Label
+gsea_cor_cd8_rcs$Enrichment = ifelse(gsea_cor_cd8_rcs$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_rcs$Enrichment <- factor(gsea_cor_cd8_rcs$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+# Plot NES
+gsea_cor_cd8_h_rcs <- ggplot(gsea_cor_cd8_rcs, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "Respiratory system compliance") 
+
+gsea_cor_cd8_h_rcs
+
+# Save as PDF
+ggsave(gsea_cor_cd8_h_rcs, filename = "gsea_cor_cd8_h_rcs.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+```{r}
+## E2F/G2M mitotic hallmark
+## Leading edge genes
+# TOP2A
+top2a <- cd8_logcpm["TOP2A", ] 
+top2a <- as.data.frame(top2a) %>% 
+  dplyr::rename(Counts = top2a) %>% 
+  rownames_to_column("sample_id")
+
+top2a_md <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Respiratory system compliance') %>% 
+  left_join(., top2a, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+top2a_plot <- ggplot(top2a_md, aes(x = `Respiratory system compliance`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  stat_cor(na.rm = T,
+           label.x = 40,
+           label.y = 2.0,
+           size = 4,
+           method = "spearman") +
+  labs(subtitle="",
+       y="TOP2A\naverage log(CPM)", 
+       x="Respiratory system compliance\n(mL/cm H20)",
+       title="") 
+
+top2a_plot
+
+# Save as PDF
+ggsave(top2a_plot, filename = "top2a_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## IFN-G response hallmark
+## Leading edge genes
+# XAF1
+xaf1 <- cd8_logcpm["XAF1", ] 
+xaf1 <- as.data.frame(xaf1) %>% 
+  dplyr::rename(Counts = xaf1) %>% 
+  rownames_to_column("sample_id")
+
+xaf1_md <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Respiratory system compliance') %>% 
+  left_join(., xaf1, by ="sample_id")
+
+#Plot
+xaf1_plot <- ggplot(xaf1_md, aes(x = `Respiratory system compliance`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  stat_cor(na.rm = T,
+           label.x = 40,
+           label.y = 2.5,
+           size = 4,
+           method = "spearman") +
+  labs(subtitle="",
+       y="XAF1\naverage log(CPM)", 
+       x="Respiratory system compliance\n(mL/cm H20)",
+       title="") 
+
+xaf1_plot
+
+# Save as PDF
+ggsave(xaf1_plot, filename = "xaf1_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## TNFa via NFKB
+## Leading edge genes
+# NR4A3
+NR4A3 <- cd8_logcpm["NR4A3", ] 
+NR4A3 <- as.data.frame(NR4A3) %>% 
+  dplyr::rename(Counts = NR4A3) %>% 
+  rownames_to_column("sample_id")
+
+NR4A3_md <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Respiratory system compliance') %>% 
+  left_join(., NR4A3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+NR4A3_plot_rsc <- ggplot(NR4A3_md, aes(x = `Respiratory system compliance`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  stat_cor(na.rm = T,
+           label.x = 40,
+           label.y = 1.5,
+           size = 4,
+           method = "spearman") +
+  labs(subtitle="",
+       y="NR4A3\naverage log(CPM)", 
+       x="Respiratory system compliance\n(mL/cm H20)",
+       title="") 
+
+NR4A3_plot_rsc
+
+# Save as PDF
+ggsave(NR4A3_plot_rsc, filename = "NR4A3_plot_rsc.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## TNF pathway
+## Leading edge genes
+# TNFAIP3 gene
+tnfaip3 <- cd8_logcpm["TNFAIP3", ] 
+tnfaip3 <- as.data.frame(tnfaip3) %>% 
+  dplyr::rename(Counts = tnfaip3) %>% 
+  rownames_to_column("sample_id")
+
+tnfaip3_md_rsc <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Respiratory system compliance') %>% 
+  left_join(., tnfaip3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+tnfaip3_plot_rsc <- ggplot(tnfaip3_md_rsc, aes(x = `Respiratory system compliance`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = 40,
+           label.y = 2.5,
+           size = 4,
+           method = "spearman") +
+  labs(subtitle="",
+       y="TNFAIP3\naverage log(CPM)", 
+       x="Respiratory system compliance\n(mL/cm H20)",
+       title="") 
+
+tnfaip3_plot_rsc
+
+# Save as PDF
+ggsave(tnfaip3_plot_rsc, filename = "tnfaip3_plot_rsc.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Discharged status variable
+# Obtain gene list
+gsea_cor_cd8_dis <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, Discharged) %>% 
+  dplyr::arrange(desc(Discharged)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- gsea_cor_cd8_dis$Discharged
+names(gene_list) <- gsea_cor_cd8_dis$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+# Run fgsea analysis
+gsea_cor_cd8_dis <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+# Label
+gsea_cor_cd8_dis$Enrichment = ifelse(gsea_cor_cd8_dis$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_dis$Enrichment <- factor(gsea_cor_cd8_dis$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+
+# Plot NES
+gsea_cor_cd8_h_dis <- ggplot(gsea_cor_cd8_dis, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "Discharged status") 
+
+gsea_cor_cd8_h_dis
+
+# # Save as PDF
+ggsave(gsea_cor_cd8_h_dis, filename = "gsea_cor_cd8_h_dis.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+```{r}
+## Deceased status
+# Obtain gene list
+gsea_cor_cd8_dec <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, Deceased) %>% 
+  dplyr::arrange(desc(Deceased)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- gsea_cor_cd8_dec$Deceased
+names(gene_list) <- gsea_cor_cd8_dec$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+# Run fgsea analysis
+gsea_cor_cd8_dec <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+# Label
+gsea_cor_cd8_dec$Enrichment = ifelse(gsea_cor_cd8_dec$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_dec$Enrichment <- factor(gsea_cor_cd8_dec$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+
+# Plot NES
+gsea_cor_cd8_h_dec <- ggplot(gsea_cor_cd8_dec, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "Deceased status") 
+
+gsea_cor_cd8_h_dec
+
+# Save as PDF
+ggsave(gsea_cor_cd8_h_dec, filename = "gsea_cor_cd8_h_dec.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+```{r}
+## Leading edge genes
+# Plot for NR4A3
+nr4a3 <- cd8_logcpm["NR4A3", ] 
+nr4a3 <- as.data.frame(nr4a3) %>% 
+  dplyr::rename(Counts = nr4a3) %>% 
+  rownames_to_column("sample_id")
+
+nr4a3_md <- cd8_samples_ordered_2 %>% 
+  dplyr::select(sample_id, Outcome) %>% 
+  left_join(., nr4a3, by ="sample_id")
+
+# Fator
+nr4a3_md$Outcome <- factor(nr4a3_md$Outcome, levels = c("Discharged", "Deceased"))
+
+# Stats
+nr4a3_stats = pairwise.wilcox.test(nr4a3_md$Counts, 
+                            nr4a3_md$Outcome) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+nr4a3_plot <- ggplot(nr4a3_md, aes(x=Outcome, y=Counts, fill=Outcome)) + 
+     scale_fill_manual(values = 
+                       c("Discharged" = outcome_pal[2],
+                         "Deceased" = outcome_pal[5])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "NR4A3\naverage log(CPM)",
+       title = "") 
+
+nr4a3_plot2 <- nr4a3_plot + geom_signif(y_position=c(3, 3),
+                  xmin = c("Discharged", 1), xmax = c("Deceased", 2),
+                  annotations = c("8.63e-03"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+nr4a3_plot2
+
+# Save as PDF
+ggsave(nr4a3_plot2, filename = "nr4a3_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 5, height = 4, units = "in")
+```
+
+
+```{r}
+# Plot for NR4A3
+tnfaip3 <- cd8_logcpm["TNFAIP3", ] 
+tnfaip3 <- as.data.frame(tnfaip3) %>% 
+  dplyr::rename(Counts = tnfaip3) %>% 
+  rownames_to_column("sample_id")
+
+tnfaip3_md <- cd8_samples_ordered_2 %>% 
+  dplyr::select(sample_id, Outcome) %>% 
+  left_join(., tnfaip3, by ="sample_id")
+
+# Fator
+tnfaip3_md$Outcome <- factor(tnfaip3_md$Outcome, levels = c("Discharged", "Deceased"))
+
+# Stats
+tnfaip3_stats = pairwise.wilcox.test(tnfaip3_md$Counts, 
+                            tnfaip3_md$Outcome) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+tnfaip3_plot <- ggplot(tnfaip3_md, aes(x=Outcome, y=Counts, fill=Outcome)) + 
+     scale_fill_manual(values = 
+                       c("Discharged" = outcome_pal[2],
+                         "Deceased" = outcome_pal[5])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "TNFAIP3\naverage log(CPM)",
+       title = "") 
+
+tnfaip3_plot2 <- tnfaip3_plot + geom_signif(y_position=c(4, 4),
+                  xmin = c("Discharged", 1), xmax = c("Deceased", 2),
+                  annotations = c("2.3e-02"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+tnfaip3_plot2
+
+# Save as PDF
+ggsave(tnfaip3_plot2, filename = "tnfaip3_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 5, height = 4, units = "in")
+```
+
+
+```{r}
+## Days on MV
+# Obtain gene list
+gsea_cor_cd8_mv <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, 'Days on MV') %>% 
+  dplyr::arrange(desc(`Days on MV`)) %>% 
+  ungroup() 
+
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- gsea_cor_cd8_mv$'Days on MV'
+names(gene_list) <- gsea_cor_cd8_mv$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+
+# Run fgsea analysis
+gsea_cor_cd8_mv <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+# Label
+gsea_cor_cd8_mv$Enrichment = ifelse(gsea_cor_cd8_mv$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_mv$Enrichment <- factor(gsea_cor_cd8_mv$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+
+# Plot NES
+gsea_cor_cd8_h_mv <- ggplot(gsea_cor_cd8_mv, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "Days on mechanical ventilation") 
+
+gsea_cor_cd8_h_mv
+
+# # Save as PDF
+ggsave(gsea_cor_cd8_h_mv, filename = "gsea_cor_cd8_h_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+
+```{r}
+## SOFA score
+# Obtain gene list
+gsea_cor_cd8_sofa <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, SOFA) %>% 
+  dplyr::arrange(desc(SOFA)) %>% 
+  ungroup() 
+
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- gsea_cor_cd8_sofa$SOFA
+names(gene_list) <- gsea_cor_cd8_sofa$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+# Run fgsea analysis
+gsea_cor_cd8_sofa <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+# Label
+gsea_cor_cd8_sofa$Enrichment = ifelse(gsea_cor_cd8_sofa$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_sofa$Enrichment <- factor(gsea_cor_cd8_sofa$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+
+# Plot NES
+gsea_cor_cd8_h_sofa <- ggplot(gsea_cor_cd8_sofa, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "SOFA score") 
+
+gsea_cor_cd8_h_sofa + theme(legend.position = "none")
+
+# Save as PDF
+ggsave(gsea_cor_cd8_h_sofa, filename = "gsea_cor_cd8_h_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+```{r}
+## Superinfection status
+# Obtain gene list
+gsea_cor_cd8_inf <- gsea_cor_cd8_matrix %>% 
+  dplyr::select(gene_name, Superinfection) %>% 
+  dplyr::arrange(desc(Superinfection)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- gsea_cor_cd8_inf$Superinfection
+names(gene_list) <- gsea_cor_cd8_inf$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+
+# Run fgsea analysis
+gsea_cor_cd8_inf <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < 0.25) %>%
+  arrange(desc(NES)) %>% 
+  dplyr::rename(Count = size)
+
+# Label
+gsea_cor_cd8_inf$Enrichment = ifelse(gsea_cor_cd8_inf$NES > 0, "Upregulated", "Downregulated") 
+gsea_cor_cd8_inf$Enrichment <- factor(gsea_cor_cd8_inf$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+
+# Plot NES
+gsea_cor_cd8_h_inf <- ggplot(gsea_cor_cd8_inf, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "Superinfection status") 
+
+gsea_cor_cd8_h_inf + theme(legend.position = "none")
+
+# Save as PDF
+ggsave(gsea_cor_cd8_h_inf, filename = "gsea_cor_cd8_h_inf.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## MKI67
+mki67 <- cd8_logcpm["MKI67", ] 
+mki67 <- as.data.frame(mki67) %>% 
+  dplyr::rename(Counts = mki67) %>% 
+  rownames_to_column("sample_id")
+
+mki67_md_mv <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Days on MV') %>% 
+  left_join(., mki67, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+mki67_plot_mv <- ggplot(mki67_md_mv, aes(x = `Days on MV`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = 30,
+           # label.y = 2,
+           # size = 6,
+           method = "spearman") +
+  labs(subtitle="",
+       y="MKI67\naverage log(CPM)", 
+       x="Days on mechanical ventilation",
+       title="") 
+
+mki67_plot_mv
+
+# Save as PDF
+ggsave(mki67_plot_mv, filename = "mki67_plot_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## TNFAIP3
+TNFAIP3 <- cd8_logcpm["TNFAIP3", ] 
+TNFAIP3 <- as.data.frame(TNFAIP3) %>% 
+  dplyr::rename(Counts = TNFAIP3) %>% 
+  rownames_to_column("sample_id")
+
+TNFAIP3_md_mv <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Days on MV') %>% 
+  left_join(., TNFAIP3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+TNFAIP3_plot_mv <- ggplot(TNFAIP3_md_mv, aes(x = `Days on MV`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = 30,
+           # label.y = 2.5,
+           # size = 6,
+           method = "spearman") +
+  labs(subtitle="",
+       y="TNFAIP3\naverage log(CPM)", 
+       x="Days on mechanical ventilation",
+       title="") 
+
+TNFAIP3_plot_mv
+
+# Save as PDF
+ggsave(TNFAIP3_plot_mv, filename = "TNFAIP3_plot_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## IFI44
+ifi44 <- cd8_logcpm["IFI44", ] 
+ifi44 <- as.data.frame(ifi44) %>% 
+  dplyr::rename(Counts = ifi44) %>% 
+  rownames_to_column("sample_id")
+
+ifi44_md_mv <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Days on MV') %>% 
+  left_join(., ifi44, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+ifi44_plot_mv <- ggplot(ifi44_md_mv, aes(x = `Days on MV`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = 30,
+           # label.y = 2.5,
+           # size = 6,
+           method = "spearman") +
+  labs(subtitle="",
+       y="IFI44\naverage log(CPM)", 
+       x="Days on mechanical ventilation",
+       title="") 
+
+ifi44_plot_mv
+
+# Save as PDF
+ggsave(ifi44_plot_mv, filename = "ifi44_plot_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## MX1
+mx1 <- cd8_logcpm["MX1", ] 
+mx1 <- as.data.frame(mx1) %>% 
+  dplyr::rename(Counts = mx1) %>% 
+  rownames_to_column("sample_id")
+
+mx1_md_mv <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Days on MV') %>% 
+  left_join(., mx1, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+mx1_plot_mv <- ggplot(mx1_md_mv, aes(x = `Days on MV`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  # ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(30),
+           method = "spearman") +
+  labs(subtitle="",
+       y="MX1\naverage log(CPM)", 
+       x="Days on mechanical ventilation",
+       title="") 
+
+mx1_plot_mv
+
+# # Save as PDF
+ggsave(mx1_plot_mv, filename = "mx1_plot_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## MX1
+NR4A3 <- cd8_logcpm["NR4A3", ] 
+NR4A3 <- as.data.frame(NR4A3) %>% 
+  dplyr::rename(Counts = NR4A3) %>% 
+  rownames_to_column("sample_id")
+
+NR4A3_md_mv <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Days on MV') %>% 
+  left_join(., NR4A3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+NR4A3_plot_mv <- ggplot(NR4A3_md_mv, aes(x = `Days on MV`, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  # ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(30),
+           method = "spearman") +
+  labs(subtitle="",
+       y="NR4A3\naverage log(CPM)", 
+       x="Days on mechanical ventilation",
+       title="") 
+
+NR4A3_plot_mv
+
+# # Save as PDF
+ggsave(NR4A3_plot_mv, filename = "NR4A3_plot_mv.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## CDKN3
+CDKN3 <- cd8_logcpm["CDKN3", ] 
+CDKN3 <- as.data.frame(CDKN3) %>% 
+  dplyr::rename(Counts = CDKN3) %>% 
+  rownames_to_column("sample_id")
+
+CDKN3_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., CDKN3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+CDKN3_plot_sofa <- ggplot(CDKN3_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="CDKN3\naverage expression", 
+       x="SOFA score",
+       title="") 
+
+CDKN3_plot_sofa
+
+# Save as PDF
+ggsave(CDKN3_plot_sofa, filename = "CDKN3_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## PLK1
+PLK1 <- cd8_logcpm["PLK1", ] 
+PLK1 <- as.data.frame(PLK1) %>% 
+  dplyr::rename(Counts = PLK1) %>% 
+  rownames_to_column("sample_id")
+
+PLK1_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., PLK1, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+PLK1_plot_sofa <- ggplot(PLK1_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#0072B5FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  # ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="PLK1\naverage log(CPM)", 
+       x="SOFA score",
+       title="") 
+
+PLK1_plot_sofa
+
+# Save as PDF
+ggsave(PLK1_plot_sofa, filename = "PLK1_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+
+```{r}
+## Leading edge genes
+## NR4A3
+NR4A3 <- cd8_logcpm["NR4A3", ] 
+NR4A3 <- as.data.frame(NR4A3) %>% 
+  dplyr::rename(Counts = NR4A3) %>% 
+  rownames_to_column("sample_id")
+
+NR4A3_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., NR4A3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+NR4A3_plot_sofa <- ggplot(NR4A3_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="NR4A3\naverage log(CPM)", 
+       x="SOFA score",
+       title="") 
+
+NR4A3_plot_sofa
+
+# Save as PDF
+ggsave(NR4A3_plot_sofa, filename = "NR4A3_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## PPP1R15A
+PPP1R15A <- cd8_logcpm["PPP1R15A", ] 
+PPP1R15A <- as.data.frame(PPP1R15A) %>% 
+  dplyr::rename(Counts = PPP1R15A) %>% 
+  rownames_to_column("sample_id")
+
+PPP1R15A_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., PPP1R15A, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+PPP1R15A_plot_sofa <- ggplot(PPP1R15A_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-3,3) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="PPP1R15A\naverage log(CPM)", 
+       x="SOFA score",
+       title="") 
+
+PPP1R15A_plot_sofa
+
+# Save as PDF
+ggsave(PPP1R15A_plot_sofa, filename = "PPP1R15A_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## PRDM1
+prdm1 <- cd8_logcpm["PRDM1", ] 
+prdm1 <- as.data.frame(prdm1) %>% 
+  dplyr::rename(Counts = prdm1) %>% 
+  rownames_to_column("sample_id")
+
+prdm1_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., prdm1, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+prdm1_plot_sofa <- ggplot(prdm1_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-2,2) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="PRDM1\naverage log(CPM)", 
+       x="SOFA score",
+       title="") 
+
+prdm1_plot_sofa
+
+# Save as PDF
+ggsave(prdm1_plot_sofa, filename = "prdm1_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## TNFAIP3
+TNFAIP3 <- cd8_logcpm["TNFAIP3", ] 
+TNFAIP3 <- as.data.frame(TNFAIP3) %>% 
+  dplyr::rename(Counts = TNFAIP3) %>% 
+  rownames_to_column("sample_id")
+
+TNFAIP3_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., TNFAIP3, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+TNFAIP3_plot_sofa <- ggplot(TNFAIP3_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-4,4) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="TNFAIP3\naverage log(CPM)", 
+       x="SOFA score",
+       title="") 
+
+TNFAIP3_plot_sofa
+
+# Save as PDF
+ggsave(TNFAIP3_plot_sofa, filename = "TNFAIP3_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## PRF1
+PRF1 <- cd8_logcpm["PRF1", ] 
+PRF1 <- as.data.frame(PRF1) %>% 
+  dplyr::rename(Counts = PRF1) %>% 
+  rownames_to_column("sample_id")
+
+PRF1_md_sofa <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, SOFA) %>% 
+  left_join(., PRF1, by ="sample_id") %>% 
+  na.omit()
+
+# Plot
+PRF1_plot_sofa <- ggplot(PRF1_md_sofa, aes(x = SOFA, y = Counts)) +
+  geom_point() + 
+  geom_smooth(color = "#BC3C29FF",
+              method = "lm",
+              se = T,
+              fullrange = T,
+              linetype = "solid",
+              alpha = 0.2,
+              size = 0.7) +
+  theme_bw() +
+  ylim(-4,4) +
+  theme(text = element_text(family = "Arial", size = 14),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0)) +
+  stat_cor(na.rm = T,
+           label.x = c(10),
+           method = "spearman") +
+  labs(subtitle="",
+       y="PRF1\naverage log(CPM)", 
+       x="SOFA score",
+       title="") 
+
+PRF1_plot_sofa
+
+# Save as PDF
+ggsave(PRF1_plot_sofa, filename = "PRF1_plot_sofa.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+
+```{r}
+## Leading edge genes
+## TNFAIP3
+TNFAIP3 <- cd8_logcpm["TNFAIP3", ] 
+TNFAIP3 <- as.data.frame(TNFAIP3) %>% 
+  dplyr::rename(Counts = TNFAIP3) %>% 
+  rownames_to_column("sample_id")
+
+TNFAIP3_md_inf <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Superinfection') %>% 
+  left_join(., TNFAIP3, by ="sample_id") %>% 
+  na.omit()
+
+# Change factors
+TNFAIP3_md_inf <- TNFAIP3_md_inf %>%  
+  dplyr::mutate(Superinfection = 
+                  case_when(Superinfection == 1 ~ "Superinfection",
+                            Superinfection == 0 ~ "Primary Only",
+                            TRUE ~ "No status")) 
+
+# Fator
+TNFAIP3_md_inf$Superinfection <- factor(TNFAIP3_md_inf$Superinfection, levels = c("Primary Only", "Superinfection"))
+
+# Stats
+TNFAIP3_inf_stats = pairwise.wilcox.test(TNFAIP3_md_inf$Counts, 
+                            TNFAIP3_md_inf$Superinfection) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+TNFAIP3_inf_plot <- ggplot(TNFAIP3_md_inf, aes(x=Superinfection, y=Counts, fill=Superinfection)) + 
+     scale_fill_manual(values = 
+                       c("Superinfection" = infection_pal[5],
+                         "Primary Only" = infection_pal[6])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "TNFAIP3\naverage log(CPM)",
+       title = "") 
+
+TNFAIP3_inf_plot2 <- TNFAIP3_inf_plot + geom_signif(y_position=c(4.2, 4),
+                  xmin = c("Primary Only", 1), xmax = c("Superinfection", 2),
+                  annotations = c("1.99e-02"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+TNFAIP3_inf_plot2
+
+# Save as PDF
+ggsave(TNFAIP3_inf_plot2, filename = "TNFAIP3_inf_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## TNFRSF9 
+TNFRSF9 <- cd8_logcpm["TNFRSF9", ] 
+TNFRSF9 <- as.data.frame(TNFRSF9) %>% 
+  dplyr::rename(Counts = TNFRSF9) %>% 
+  rownames_to_column("sample_id")
+
+TNFRSF9_md_inf <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Superinfection') %>% 
+  left_join(., TNFRSF9, by ="sample_id") %>% 
+  na.omit()
+
+# Chnge factors
+TNFRSF9_md_inf <- TNFRSF9_md_inf %>%  
+  dplyr::mutate(Superinfection = 
+                  case_when(Superinfection == 1 ~ "Superinfection",
+                            Superinfection == 0 ~ "Primary Only",
+                            TRUE ~ "No status")) 
+
+# Fator
+TNFRSF9_md_inf$Superinfection <- factor(TNFRSF9_md_inf$Superinfection, levels = c("Primary Only", "Superinfection"))
+
+# Stats
+TNFRSF9_inf_stats = pairwise.wilcox.test(TNFRSF9_md_inf$Counts, 
+                            TNFRSF9_md_inf$Superinfection) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+TNFRSF9_inf_plot <- ggplot(TNFRSF9_md_inf, aes(x=Superinfection, y=Counts, fill=Superinfection)) + 
+     scale_fill_manual(values = 
+                       c("Superinfection" = infection_pal[5],
+                         "Primary Only" = infection_pal[6])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "TNFRSF9\naverage log(CPM)",
+       title = "") 
+
+TNFRSF9_inf_plot2 <- TNFRSF9_inf_plot + geom_signif(y_position=c(4, 4),
+                  xmin = c("Primary Only", 1), xmax = c("Superinfection", 2),
+                  annotations = c("2.55e-02"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+TNFRSF9_inf_plot2
+
+# Save as PDF
+ggsave(TNFRSF9_inf_plot2, filename = "TNFRSF9_inf_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## DUSP2
+DUSP2 <- cd8_logcpm["DUSP2", ] 
+DUSP2 <- as.data.frame(DUSP2) %>% 
+  dplyr::rename(Counts = DUSP2) %>% 
+  rownames_to_column("sample_id")
+
+DUSP2_md_inf <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Superinfection') %>% 
+  left_join(., DUSP2, by ="sample_id") %>% 
+  na.omit()
+
+# Chnge factors
+DUSP2_md_inf <- DUSP2_md_inf %>%  
+  dplyr::mutate(Superinfection = 
+                  case_when(Superinfection == 1 ~ "Superinfection",
+                            Superinfection == 0 ~ "Primary Only",
+                            TRUE ~ "No status")) 
+
+# Fator
+DUSP2_md_inf$Superinfection <- factor(DUSP2_md_inf$Superinfection, levels = c("Primary Only", "Superinfection"))
+
+# Stats
+DUSP2_inf_stats = pairwise.wilcox.test(DUSP2_md_inf$Counts, 
+                            DUSP2_md_inf$Superinfection) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+DUSP2_inf_plot <- ggplot(DUSP2_md_inf, aes(x=Superinfection, y=Counts, fill=Superinfection)) + 
+     scale_fill_manual(values = 
+                       c("Superinfection" = infection_pal[5],
+                         "Primary Only" = infection_pal[6])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "DUSP2\naverage log(CPM)",
+       title = "") 
+
+DUSP2_inf_plot2 <- DUSP2_inf_plot + geom_signif(y_position=c(3, 3),
+                  xmin = c("Primary Only", 1), xmax = c("Superinfection", 2),
+                  annotations = c("4.42e-02"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+DUSP2_inf_plot2
+
+# Save as PDF
+ggsave(DUSP2_inf_plot2, filename = "DUSP2_inf_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+```{r}
+## Leading edge genes
+## NAMPT 
+NAMPT <- cd8_logcpm["NAMPT", ] 
+NAMPT <- as.data.frame(NAMPT) %>% 
+  dplyr::rename(Counts = NAMPT) %>% 
+  rownames_to_column("sample_id")
+
+NAMPT_md_inf <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Superinfection') %>% 
+  left_join(., NAMPT, by ="sample_id") %>% 
+  na.omit()
+
+# Chnge factors
+NAMPT_md_inf <- NAMPT_md_inf %>%  
+  dplyr::mutate(Superinfection = 
+                  case_when(Superinfection == 1 ~ "Superinfection",
+                            Superinfection == 0 ~ "Primary Only",
+                            TRUE ~ "No status")) 
+
+# Fator
+NAMPT_md_inf$Superinfection <- factor(NAMPT_md_inf$Superinfection, levels = c("Primary Only", "Superinfection"))
+
+# Stats
+NAMPT_inf_stats = pairwise.wilcox.test(NAMPT_md_inf$Counts, 
+                            NAMPT_md_inf$Superinfection) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+NAMPT_inf_plot <- ggplot(NAMPT_md_inf, aes(x=Superinfection, y=Counts, fill=Superinfection)) + 
+     scale_fill_manual(values = 
+                       c("Superinfection" = infection_pal[5],
+                         "Primary Only" = infection_pal[6])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "NAMPT\naverage log(CPM)",
+       title = "") 
+
+NAMPT_inf_plot2 <- NAMPT_inf_plot + geom_signif(y_position=c(6, 6),
+                  xmin = c("Primary Only", 1), xmax = c("Superinfection", 2),
+                  annotations = c("1.36e-02"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+NAMPT_inf_plot2
+
+# Save as PDF
+ggsave(NAMPT_inf_plot2, filename = "NAMPT_inf_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+## Leading edge genes
+## PLK1
+PLK1 <- cd8_logcpm["PLK1", ] 
+PLK1 <- as.data.frame(PLK1) %>% 
+  dplyr::rename(Counts = PLK1) %>% 
+  rownames_to_column("sample_id")
+
+PLK1_md_inf <- cor_rna_cd8_mdf %>% 
+  dplyr::select(sample_id, 'Superinfection') %>% 
+  left_join(., PLK1, by ="sample_id") %>% 
+  na.omit()
+
+# Chnge factors
+PLK1_md_inf <- PLK1_md_inf %>%  
+  dplyr::mutate(Superinfection = 
+                  case_when(Superinfection == 1 ~ "Superinfection",
+                            Superinfection == 0 ~ "Primary Only",
+                            TRUE ~ "No status")) 
+
+# Fator
+PLK1_md_inf$Superinfection <- factor(PLK1_md_inf$Superinfection, levels = c("Primary Only", "Superinfection"))
+
+# Stats
+PLK1_inf_stats = pairwise.wilcox.test(PLK1_md_inf$Counts, 
+                            PLK1_md_inf$Superinfection) %>% 
+  tidy() %>% 
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T))
+
+# Plot
+PLK1_inf_plot <- ggplot(PLK1_md_inf, aes(x=Superinfection, y=Counts, fill=Superinfection)) + 
+     scale_fill_manual(values = 
+                       c("Superinfection" = infection_pal[5],
+                         "Primary Only" = infection_pal[6])) +
+     theme_bw() +
+     geom_violin(trim=FALSE) +
+     guides(fill = "none") +
+     theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .1))) +
+  labs(x = "", 
+       y = "PLK1\naverage log(CPM)",
+       title = "") 
+
+PLK1_inf_plot2 <- PLK1_inf_plot + geom_signif(y_position=c(3, 3),
+                  xmin = c("Primary Only", 1), xmax = c("Superinfection", 2),
+                  annotations = c("1.46e-02"),
+                  tip_length = 0.01,
+                  textsize = 4.5)
+
+PLK1_inf_plot2
+
+# Save as PDF
+ggsave(PLK1_inf_plot2, filename = "PLK1_inf_plot2.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+# Patch
+layout <- "ABC
+           ABC
+           ABD
+           ABD"
+gsea_outcome <- gsea_cor_cd8_h_dis + gsea_cor_cd8_h_dec + tnfaip3_plot2 + nr4a3_plot2 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+gsea_outcome
+
+# Save PDF
+ggsave(gsea_outcome, filename = "gsea_outcome.pdf", dpi = 300, device = cairo_pdf,
+       width = 18, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC
+           ADE"
+gsea_mv.2 <- gsea_cor_cd8_h_mv + NR4A3_plot_mv + TNFAIP3_plot_mv + ifi44_plot_mv  + mki67_plot_mv +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+gsea_mv.2
+
+# Save PDF
+ggsave(gsea_mv.2, filename = "gsea_mv.2.pdf", dpi = 300, device = cairo_pdf,
+       width = 15, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC
+           ADE"
+
+gsea_rsc.2 <- gsea_cor_cd8_h_rcs + top2a_plot + xaf1_plot + tnfaip3_plot_rsc + NR4A3_plot_rsc +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+gsea_rsc.2
+
+# Save PDF
+ggsave(gsea_rsc.2, filename = "gsea_rsc.2.pdf", dpi = 300, device = cairo_pdf,
+       width = 15, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC
+           ADE"
+
+gsea_sofa.2 <- gsea_cor_cd8_h_sofa + TNFAIP3_plot_sofa + NR4A3_plot_sofa + PLK1_plot_sofa + CDKN3_plot_sofa +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+gsea_sofa.2
+
+# Save PDF
+ggsave(gsea_sofa.2, filename = "gsea_sofa.2.pdf", dpi = 300, device = cairo_pdf,
+       width = 15, height = 8, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "ABC
+           ADE"
+
+gsea_infection.2 <- gsea_cor_cd8_h_inf + TNFRSF9_inf_plot2 + TNFAIP3_inf_plot2 + DUSP2_inf_plot2 + PLK1_inf_plot2 +
+  plot_layout(design = layout, guides = "collect") & theme(legend.position = 'bottom')
+
+gsea_infection.2
+
+# Save PDF
+ggsave(gsea_infection.2, filename = "gsea_infection.2.pdf", dpi = 300, device = cairo_pdf,
+       width = 15, height = 8, units = "in")
+```
+
+
+
+DONE!
+
+
+
+

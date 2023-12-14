@@ -1,0 +1,1059 @@
+---
+title: "Bulk RNA-seq analysis of alveolar Treg cells"
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: to identify transcriptional signatures associated with outcomes throughout the course of severe pna
+---
+
+
+```{r}
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/") 
+
+library(dplyr)
+library(edgeR)
+library(DESeq2)
+library(statmod)
+library(fgsea)
+library(gage)
+library(topGO)
+library(rrvgo)
+library(factoextra)
+library(stringi)
+library(Cairo)
+library(ggsci)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(colorspace)
+library(devtools)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(ggnewscale)
+library(patchwork)
+library(biomaRt)
+
+# Set seed
+set.seed(8271)
+
+# Palettes
+pna_pal = pal_nejm("default")(8)
+outcome_pal = pal_simpsons("springfield")(16)
+antigen_pal2 = pal_d3("category20")(20)
+```
+
+```{r}
+## Get annotation from biomaRt
+sapiens_mart = useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+
+saveRDS(sapiens_mart, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/sapiens_mart.rds")
+
+anno_mart <- getBM(mart = sapiens_mart, 
+                   attributes = c('go_id', 'external_gene_name', 'ensembl_gene_id', 'description'))
+
+saveRDS(anno_mart, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/anno_mart.rds")
+```
+
+
+```{r}
+## Treg cell analysis (edgeR). Check QC metrics and remove outliers
+# Filter Treg samples from metadata - 108 samples
+tcell_samples_bulk_final_treg <- tcell_samples_bulkfacs_final %>% 
+  filter(cell_type2 == "Treg")
+
+## Make sure samples match order between counts table and metadata
+# Which samples belong Tregs from all counts table
+treg_vec <- tcell_samples_bulk_final_treg$sample_id[tcell_samples_bulk_final_treg$sample_id %in% colnames(all_samples_cts_edger)]
+
+# Which order
+treg_counts_ordered <- match(treg_vec, colnames(all_samples_cts_edger))
+
+# Apply to matrix
+treg_counts_ordered <- all_samples_cts_edger[, treg_counts_ordered]
+
+# Order samples in metadata
+treg_md_ordered <- match(treg_vec, tcell_samples_bulk_final_treg$sample_id)
+treg_samples_ordered <- tcell_samples_bulk_final_treg[treg_md_ordered, ]
+
+# Verify
+treg_samples_ordered$sample_id == colnames(treg_counts_ordered)
+
+# Verify again
+sum(treg_samples_ordered$sample_id != colnames(treg_counts_ordered))
+```
+
+
+```{r}
+## edgeR run 
+# Define groups
+group = factor(treg_samples_ordered$pna_type_verified)
+ 
+# Define DGEList  
+edger_tregs <- DGEList(counts = treg_counts_ordered, group = group) 
+
+# Calculate normalization factors
+edger_tregs <- calcNormFactors(edger_tregs)
+
+# Filtering 
+keep <- filterByExpr(edger_tregs)
+edger_tregs <- edger_tregs[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_tregs$samples$lib.size <- colSums(edger_tregs$counts)
+
+# Vizualize library size
+barplot(edger_tregs$samples$lib.size*1e-6, 
+        names= 1:108, 
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL")
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_tregs <- calcNormFactors(edger_tregs)
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_tregs, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+# Get moderated log-cpm for inspection and viz of samples
+edger_tregs_norm <- cpm(edger_tregs, log = TRUE)
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+treg_col <- c("red", "blue","orange","green")[group]
+points <- c(1,2,3,4)[group]
+plotMDS(edger_tregs, col = treg_col, gene.selection = "common") # add pch = points if want symbols instead of sample names
+
+
+# Plot library size
+treg_cts_df <- data.frame(colSums(treg_counts_ordered))  
+colnames(treg_cts_df) <- "count"
+treg_cts_df$sample <- factor(rownames(treg_cts_df), 
+                             levels = rownames(treg_cts_df)[order(treg_cts_df$count)])
+
+ggplot(treg_cts_df) + geom_col(aes(x = sample, y = count)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Plot library size after norm factors applied
+lib_size <- as.data.frame(edger_tregs$samples) %>% 
+  rownames_to_column("sample_id") 
+
+ggplot(lib_size) + geom_col(aes(x = reorder(sample_id, lib.size), y = lib.size)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Add rownames to md
+rownames(treg_samples_ordered) <- treg_samples_ordered$sample_id
+
+# Generate df to look at PCs and genes of interest across samples
+treg_cts_df2 <- plotMDS(edger_tregs, col = treg_col, gene.selection = "common") %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  dplyr::select(sample_id, x, y) %>% 
+  dplyr::rename(PC1 = x, PC2 = y)
+
+  
+# Plot library sizes on PCA
+treg_cts_df2$count <- treg_cts_df[treg_cts_df2$sample, "count"]
+
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = log2(count))) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+# Add mqc uniquely mapped reads %
+mapped_reads <- treg_samples_ordered %>% 
+  dplyr::select(sample_id, mqc_mapped, batch) 
+
+treg_cts_df2 <- left_join(treg_cts_df2, mapped_reads, by = "sample_id")
+
+# reads
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = mqc_mapped)) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+# Is there batch effect? none appreciated
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = mqc_mapped)) +
+  coord_fixed()
+
+# Check for outliers based on specific genes of interest
+treg_cts_df2$foxp3 <- edger_tregs_norm["FOXP3", ]
+
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = foxp3)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+treg_cts_df2$cd4 <- edger_tregs_norm["CD4", ]
+
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = cd4)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+# treg_cts_df2$cd8a <- edger_tregs_norm["CD8A", ] # Filtered gene on prior step 
+# 
+# ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = cd8a)) +
+#   coord_fixed() + 
+#   scale_color_gradientn(colours = rainbow(3))
+
+treg_cts_df2$c1qc <- edger_tregs_norm["C1QC", ]
+
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = c1qc)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+treg_cts_df2$xist <- edger_tregs_norm["XIST", ]
+
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = xist)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+treg_cts_df2$rps4y1 <- edger_tregs_norm["RPS4Y1", ]
+
+ggplot(treg_cts_df2) + geom_point(aes(x = PC1, y = PC2, color = rps4y1)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+# Join with putative gender
+putative_gender <- tcell_samples_bulk_final %>% 
+  dplyr::select(sample_id, gender)
+
+treg_cts_df2 <- inner_join(treg_cts_df2, putative_gender, by = "sample_id")
+
+# Sex mismatches: S300311419 putative gender female, RNA male
+
+# PLot mapped reads to establish cutoff
+ggplot(treg_cts_df2) +
+  geom_histogram(aes(x = mqc_mapped), bins = 25) # filter < 10 seems reasonable
+
+ggplot(treg_cts_df2) +
+  geom_histogram(aes(x = foxp3), bins = 20) # filter < 5 seems reasonable
+
+ggplot(treg_cts_df2) +
+  geom_histogram(aes(x = cd4), bins = 20) # filter < 5 seems reasonable
+
+ggplot(treg_cts_df2) +
+  geom_histogram(aes(x = c1qc), bins = 50) # filter > 9
+
+# Filter out outlier samples
+treg_out <- filter(treg_cts_df2, mqc_mapped < 10 | foxp3 < 6 | cd4 < 5 | c1qc > 9)
+treg_out_vec <- treg_out$sample_id
+
+# 35 samples
+# [1] "S304017581" "S360753314" "S360790027" "S360795729" "S360796257" "S360796330" "S360780825" "S360780843" "S360762762"
+# [10] "S360812684" "S360787493" "S360780493" "S360763008" "S360762087" "S360753260" "S304017128" "S304019349" "S360753331"
+# [19] "S304019613" "S360767701" "S304017112" "S304020241" "S300311498" "S300311438" "S304020341" "S360762971" "S360755072"
+# [28] "S360762674" "S360796264" "S360762985" "S360753307" "S360762987" "S304020813" "S360761088" "S360761086"
+
+# Remove selected samples
+treg_counts_ordered_2 <- treg_counts_ordered[, !colnames(treg_counts_ordered) %in% treg_out_vec]
+
+# Match order with metadata
+treg_md_ordered <- match(colnames(treg_counts_ordered_2), treg_samples_ordered$sample_id)
+treg_samples_ordered_2 <- treg_samples_ordered[treg_md_ordered, ]
+
+# Verify
+treg_samples_ordered_2$sample_id == colnames(treg_counts_ordered_2)
+
+# Verify again
+sum(treg_samples_ordered_2$sample_id != names(treg_counts_ordered_2))
+
+dim(treg_samples_ordered_2) # 73
+
+# Save counts table
+write.csv(treg_counts_ordered_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/treg_counts.csv")
+
+# Make final for checking once more
+treg_cts_df2_count <- treg_cts_df2 %>% 
+  dplyr::select(sample_id, count)
+
+treg_samples_ordered_2 <- left_join(treg_samples_ordered_2, treg_cts_df2_count, by = "sample_id")
+
+treg_samples_ordered_2 <- as.data.frame(treg_samples_ordered_2)
+```
+
+
+```{r}
+## edgeR run 2
+# Define groups
+group = factor(treg_samples_ordered_2$pna_type_verified)
+
+# Define DGEList  
+edger_tregs3 <- DGEList(counts = treg_counts_ordered_2, group = group) 
+
+# Calculate normalization factors
+edger_tregs3 <- calcNormFactors(edger_tregs3)
+
+# Filtering 
+keep <- filterByExpr(edger_tregs3)
+edger_tregs3 <- edger_tregs3[keep, , keep.lib.sizes=FALSE]
+
+# Recompute library size
+edger_tregs3$samples$lib.size <- colSums(edger_tregs3$counts)
+
+# Vizualize library size
+barplot(edger_tregs3$samples$lib.size*1e-6, 
+        names= 1:73, 
+        ylab="Library size (millions)", 
+        xlab="sample",
+        main="ALL")
+abline(h = 4, col = "red", lty = 2, lwd = 2)
+
+# TMM normalization 
+edger_tregs3 <- calcNormFactors(edger_tregs3)
+
+# Vizualize effect of TMM normalization (inspect all samples)
+plotMD(cpm(edger_tregs3, log = TRUE), column = 1) +
+  abline(h = 0, col = "red", lty = 2, lwd =2 )
+
+#Save
+saveRDS(edger_tregs3, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/edger_tregs3.rds")
+
+# Get moderated log-cpm for inspection and viz of samples
+edger_tregs_norm3 <- cpm(edger_tregs3, log = TRUE)
+
+#Save
+saveRDS(edger_tregs_norm3, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/edger_tregs_norm3.rds")
+
+# MDS plot. Can Modify gene selection to change from MDS/PCoA to PCA
+treg_col <- c("red", "blue","orange","green")[group]
+plotMDS(edger_tregs3, col = treg_col, gene.selection = "common")
+
+# Visualize third and fourth component
+plotMDS(edger_tregs3, col = treg_col, gene.selection = "common", dim = c(3,4))
+
+# Plot library size
+treg_cts_df <- data.frame(colSums(treg_counts_ordered_2))  
+colnames(treg_cts_df) <- "count"
+treg_cts_df$sample <- factor(rownames(treg_cts_df), 
+                             levels = rownames(treg_cts_df)[order(treg_cts_df$count)])
+
+ggplot(treg_cts_df) + geom_col(aes(x = sample, y = count)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Plot library size after norm factors applied
+lib_size <- as.data.frame(edger_tregs3$samples) %>% 
+  rownames_to_column("sample_id") 
+
+ggplot(lib_size) + geom_col(aes(x = reorder(sample_id, lib.size), y = lib.size)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1))
+
+# Add rownames to md
+rownames(treg_samples_ordered_2) <- treg_samples_ordered_2$sample_id
+
+# Generate df to look at PCs and genes of interest across samples
+treg_cts_df3 <- plotMDS(edger_tregs3, col = treg_col, gene.selection = "common")[c("x", "y", "distance.matrix.squared")] %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  dplyr::select(sample_id, x, y) %>% 
+  dplyr::rename(PC1 = x, PC2 = y)
+
+# Plot library sizes on PCA
+treg_cts_df3$count <- treg_cts_df[treg_cts_df3$sample, "count"]
+
+ggplot(treg_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = log2(count))) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+# Add mqc uniquely mapped reads %
+mapped_reads <- treg_samples_ordered_2 %>% 
+  dplyr::select(sample_id, mqc_mapped) 
+
+treg_cts_df3 <- left_join(treg_cts_df3, mapped_reads, by = "sample_id")
+
+ggplot(treg_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = mqc_mapped)) +
+  coord_fixed() +
+  scale_color_gradientn(colours = rainbow(3))
+
+
+# Check for outliers based on specific genes of interest
+treg_cts_df3$foxp3 <- edger_tregs_norm3["FOXP3", ]
+
+ggplot(treg_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = foxp3)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+treg_cts_df3$cd4 <- edger_tregs_norm3["CD4", ]
+
+ggplot(treg_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = cd4)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+
+treg_cts_df3$c1qc <- edger_tregs_norm3["C1QC", ]
+
+ggplot(treg_cts_df3) + geom_point(aes(x = PC1, y = PC2, color = c1qc)) +
+  coord_fixed() + 
+  scale_color_gradientn(colours = rainbow(3))
+```
+
+
+```{r}
+## GLM approach 
+# Design matrix (+0 so this is used for pairwise comparisons)
+design <- model.matrix(~ 0 + group, data = edger_tregs3$samples)
+colnames(design) <- c("COVID", "NPC", "OP", "OVP")
+design
+
+# Estimating Dispersion, GLM
+#To estimate common dispersion and tagwise dispersions in one run (recommended):
+edger_tregs3 <- estimateDisp(edger_tregs3, design, robust=TRUE)
+
+# Plot BCV
+plotBCV(edger_tregs3)
+
+# Perform GLM model fitting, a negative binomial generalized log-linear model to counts
+fit <- glmFit(edger_tregs3, design, robust=TRUE) 
+
+# Make contrasts
+contrasts <- makeContrasts(
+  COVIDvsNPC = COVID - NPC,
+  COVIDvsOP = COVID - OP,
+  COVIDvsOVP = COVID - OVP,
+  NPCvsOP = NPC - OP,
+  NPCvsOVP = NPC - OVP,
+  OPvsOVP = OP - OVP,
+  COVIDvsALL = COVID - (NPC + OP + OVP)/3,
+  levels = design)
+
+
+## ANOVA-like testing 
+# Design matrix with intercept for ANOVA testing
+design_intercept <- model.matrix(~ group, data = edger_tregs3$samples)
+
+# Estimate dispersion
+edger_tregs3_intercept <- estimateDisp(edger_tregs3, design_intercept, robust=TRUE)
+
+# Perform LRT method under GLM framework
+fit_intercept <- glmQLFit(edger_tregs3_intercept, design_intercept, robust=TRUE)
+
+# Specify multiple coefficients
+edger_treg_anova <- glmLRT(fit_intercept, coef = 2:4)
+topTags.treg.anova <- topTags(edger_treg_anova, n = Inf, adjust.method = "fdr") # get top DEG
+topTags.treg.anova <- as.data.frame(topTags.treg.anova)
+
+# Filter significant genes by FDR <0.05
+topTags.treg.anova.fdr05 <- topTags.treg.anova %>% 
+  filter(FDR < 0.05)
+
+# ANOVA contrast table
+logCPM_tregs <- cpm(edger_tregs3_intercept, prior.count = 2, log = TRUE)
+
+# Verify
+sum(treg_samples_ordered_2$sample_id != colnames(logCPM_tregs))
+
+# Match
+rownames(logCPM_tregs) <- rownames(edger_tregs3_intercept$counts)
+colnames(logCPM_tregs) <- treg_samples_ordered_2$sample_id
+```
+
+```{r}
+## Let's visualize DEA
+# Get counts matrix
+treg_logcpm <- logCPM_tregs[rownames(topTags.treg.anova.fdr05), ]
+
+# Scale values (SD of 1 and mean of 0 aka beautiful gaussian normal distribution)
+treg_logcpm <-  t(scale(t(treg_logcpm))) 
+
+
+# Elbow method
+fviz_nbclust(treg_logcpm, kmeans, method = "wss") +
+  geom_vline(xintercept = 2, linetype = 2) +
+  labs(subtitle = "Elbow method") 
+
+# K-means
+set.seed(8271)
+centers = 2
+treg_logcpm_clusters <- as.data.frame(kmeans(x = treg_logcpm,
+                                            centers = centers, 
+                                            iter.max = 1000, 
+                                            nstart = 500)$cluster)
+colnames(treg_logcpm_clusters) <- "cluster"
+
+treg_logcpm_clusters <- treg_logcpm_clusters[order(treg_logcpm_clusters$cluster), , drop = FALSE] # order clusters
+treg_logcpm <- treg_logcpm[rownames(treg_logcpm_clusters), ] # reorder matrix to same order of genes
+
+gaps <- cumsum(table(treg_logcpm_clusters))[1:centers] # where in plot you want gaps
+
+# Clinical metadata annotation
+treg_samples_ordered_2$Diagnosis <- factor(treg_samples_ordered_2$pna_type_verified,
+                                          levels = c("Non-pneumonia control", "Other pneumonia",
+                                                     "COVID-19", "Other viral pneumonia"))
+treg_samples_ordered_2$Outcome <- factor(treg_samples_ordered_2$Outcome,
+                                        levels = c("Discharged", "Deceased"))
+
+treg_samples_ordered_2$Infection_status <- factor(treg_samples_ordered_2$Superinfection_verified,
+                                                 levels = c("Primary Only", "Superinfection", "VAP"))
+
+# Add finite days and early samples flag
+treg_samples_ordered_2$finite_day_of_intubation = treg_samples_ordered_2$day_of_intubation
+treg_samples_ordered_2$finite_day_of_intubation[is.infinite(treg_samples_ordered_2$finite_day_of_intubation)] = NA
+
+# Annotation
+annotation_col <- treg_samples_ordered_2 %>% 
+  dplyr::select(Diagnosis, Outcome,
+                'Infection status' = Infection_status,
+                'Days from intubation' = finite_day_of_intubation)
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha = HeatmapAnnotation(df = annotation_col,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+# Change row cluster order                       
+split = factor(treg_logcpm_clusters$cluster, levels = c(1,2))
+
+# Plot (Clustered)
+set.seed(8271)
+treg_rna_md <- Heatmap(mat = treg_logcpm,
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = TRUE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = FALSE,
+               column_split = 3,
+               split = split,
+               row_gap = unit(1.5, "mm"),
+               column_gap = unit(1.5, "mm"),
+               column_title = "Treg cell samples",
+               row_title = "Differentially expressed genes (80)",
+               top_annotation = ha, 
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+treg_rna_md 
+
+treg_rna_md   <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(treg_rna_md, 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+treg_rna_md  
+
+# Save PDF
+ pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/treg_rna_md.pdf", width=12, height=10)
+ print(treg_rna_md)
+ dev.off()
+```
+
+```{r}
+# Plot (Unclustered)
+# Annotation
+annotation_col2 <- treg_samples_ordered_2 %>% 
+  dplyr::select(Diagnosis, 
+                # 'COVID-19 PCR' = COVID_19,
+                Outcome,
+                'Infection status' = Infection_status,
+                 finite_day_of_intubation) %>% 
+  arrange(Diagnosis, finite_day_of_intubation) %>% 
+  dplyr::rename('Days from intubation' = finite_day_of_intubation)
+
+# Color
+col_fun = circlize::colorRamp2(
+  seq(-3, 3, length.out = 8), 
+  rev(brewer.pal(8, "RdBu")))
+
+# Annotations for CH
+ha2 = HeatmapAnnotation(df = annotation_col2,
+                       col = list(
+                         Diagnosis = c("Non-pneumonia control" = pna_pal[2],
+                                       "Other pneumonia" = pna_pal[3],
+                                       "COVID-19" = pna_pal[1],
+                                       "Other viral pneumonia" = pna_pal[4]),
+                         # 'COVID-19 PCR'= c("Positive" = antigen_pal2[11],
+                         #                   "Negative" = antigen_pal2[15]),
+                         Outcome = c("Discharged" = outcome_pal[2],
+                                     "Deceased" = outcome_pal[5]),
+                         'Days from intubation'= colorRamp2(c(0,2,10,25,50,75,100), hcl_palette = "Green-Yellow"),
+                         'Infection status' = c("Primary Only" = infection_pal[6],
+                                                "Superinfection" = infection_pal[5],
+                                                "VAP" = infection_pal[10])),
+                       na_col = "white",
+                       annotation_name_gp= gpar(fontsize = 12, fontface = "bold"),
+                       annotation_legend_param = list(
+                         'Days from intubation' = list(
+                           at = c(0,2,10,25,50,100),
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11)),
+                           Diagnosis= list( 
+                             title_gp = gpar(fontsize = 12, 
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                           Outcome = list( 
+                             title_gp = gpar(fontsize = 12,
+                                             fontface = "bold"), 
+                             labels_gp = gpar(fontsize = 11)),
+                         'Infection status' = list(
+                           title_gp = gpar(fontsize = 12, 
+                                           fontface = "bold"),
+                           labels_gp = gpar(fontsize = 11))
+                           ))
+
+# Column split
+column_split = rep("Non-pneumonia control", 73)
+column_split[9:22] = "Other pneumonia"
+column_split[23:69] = "COVID-19"
+column_split[70:73] = "Other viral pneumonia"
+cs <- as.data.frame(column_split)
+
+cs$column_split <- factor(cs$column_split, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot
+set.seed(8271)
+treg_rna_unclust <- Heatmap(mat = treg_logcpm[, rownames(annotation_col2)], 
+               name = "Normalized expression",
+               col = col_fun,
+               cluster_rows = FALSE,
+               cluster_columns = FALSE,
+               clustering_distance_columns = "euclidean",
+               clustering_distance_rows = "euclidean",
+               clustering_method_columns = 'ward.D2',
+               clustering_method_rows = 'ward.D2',
+               show_column_names = FALSE,
+               show_row_names = FALSE,
+               top_annotation = ha2,
+               row_km = 2,
+               column_split = cs$column_split,
+               column_title = NULL,
+               row_title = "Differentially expressed genes (80)",
+               heatmap_legend_param = list(title = "Normalized abundance",
+                                           at = c(-2,0,2), labels = c(-3,0,3),
+                                           legend_direction = "horizontal",
+                                           legend_width = unit(4, "cm"),
+                                           heatmap_legend_side = "bottom",
+                                           annotation_legend_side = "bottom",
+                                           title_gp = gpar(fontface='bold',fontsize = 12),
+                                           legend_gp = gpar(fontsize = 12)))
+
+treg_rna_unclust 
+
+treg_rna_unclust   <- ggplotify::as.ggplot(grid.grabExpr(
+      draw(treg_rna_unclust, 
+           annotation_legend_side = "bottom", 
+           heatmap_legend_side = "bottom", 
+           merge_legend = FALSE),
+      width = 14, height = 8))
+
+treg_rna_unclust  
+
+# Save PDF
+pdf("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/treg_rna_unclust.pdf", width=12, height=10)
+print(treg_rna_unclust)
+dev.off()
+```
+
+
+```{r}
+# Save cd4 df with anonymized pt/sample id
+treg_rna_md <- treg_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, study_id, cell_type2, sample_id, age, gender, Diagnosis, Outcome, Infection_status, day_of_intubation) %>% 
+  remove_rownames()
+
+treg_rna_metadata <- inner_join(treg_rna_md, allu_rna_id_anonym, by = "study_id") %>% 
+  dplyr::select(-study_id)
+
+# Add anonymized pt/sample id
+treg_rna_metadata <- treg_rna_metadata %>% 
+  dplyr::mutate(anonym_pt_study_id = gsub("^[^-]+", "", treg_rna_metadata$tc_pt_study_id))
+  
+treg_rna_metadata$Anonymized_pt_study_id <- paste(treg_rna_metadata$Anonymized_id, treg_rna_metadata$anonym_pt_study_id) 
+
+treg_rna_metadata_final <- treg_rna_metadata %>% 
+  dplyr::select(Anonymized_id, Anonymized_pt_study_id, Sample = sample_id, Cell = cell_type2, Diagnosis, Age = age, Sex = gender, Outcome, 'Infection status' = Infection_status, 'Days from intubation' = day_of_intubation)
+  
+# Save metadata
+write.csv(treg_rna_metadata_final, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/treg_rna_metadata_final.csv")
+```
+
+```{r}
+## Extract genes per cluster from k-means CLUSTERED figure
+# Load anno_mart
+anno_mart <- readRDS("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/anno_mart.rds")
+
+kmeans_genes_treg_edger <- topTags.treg.anova.fdr05[rownames(treg_logcpm_clusters),]
+kmeans_genes_treg_edger$cluster <- treg_logcpm_clusters[rownames(kmeans_genes_treg_edger), "cluster"]
+
+kmeans_genes_treg_edger <- kmeans_genes_treg_edger %>% 
+  rownames_to_column("gene_name")
+
+anno_match <- match(kmeans_genes_treg_edger$gene_name, anno_mart$external_gene_name)
+kmeans_genes_treg_edger$gene<-anno_mart[anno_match,'ensembl_gene_id']
+kmeans_genes_treg_edger$description<-anno_mart[anno_match,'description']
+
+write.csv(kmeans_genes_treg_edger, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/kmeans_genes_treg_edger.csv")
+# 80 genes
+
+## Filter by cluster for downstream topGO analysis
+# Cluster 1 (37 genes)  
+kmeans_genes_treg_edger_1 <- kmeans_genes_treg_edger %>% 
+  filter(cluster == 1)
+write.csv(kmeans_genes_treg_edger_1, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/kmeans_genes_treg_edger_1.csv")
+
+# Cluster 2 (43)  
+kmeans_genes_treg_edger_2 <- kmeans_genes_treg_edger %>% 
+  filter(cluster == 2)
+write.csv(kmeans_genes_treg_edger_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/kmeans_genes_treg_edger_2.csv")
+```
+
+```{r}
+## TopGO Analysis 
+# Cluster 1
+# Gene universe as all genes detected in dataset
+all_treg_genes <- row.names(edger_tregs3)
+write.csv(all_treg_genes, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/all_treg_genes.csv")
+
+# Genes of interest
+interest_treg_genes_1 <- kmeans_genes_treg_edger_1$gene_name
+write.csv(interest_treg_genes_1, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/interest_treg_genes_1.csv")
+
+# Gene-to-GO annotation list 
+gene_2_GO = unstack(anno_mart[, c(1,2)])
+
+# Remove any genes without GO annotation
+keep = interest_treg_genes_1 %in% anno_mart[ ,2]
+keep = which(keep == TRUE)
+interest_treg_genes_1 = interest_treg_genes_1[keep]
+
+# Factor genes of interest (1 = selected, 0 = not selected in topGO)
+geneList = factor(as.integer(all_treg_genes %in% interest_treg_genes_1))
+names(geneList) = all_treg_genes
+geneList
+
+# Build topGO object
+go_data_treg.1 = new("topGOdata", 
+              ontology = "BP", 
+              allGenes = geneList,
+              annot = annFUN.gene2GO, 
+              gene2GO = gene_2_GO)
+ 
+# Run Fisher test
+classic_fisher_result = runTest(go_data_treg.1, algorithm ='classic', statistic ='fisher')
+
+# Generate Gentable
+allGO = usedGO(go_data_treg.1)
+results_treg_1_fis = GenTable(go_data_treg.1, 
+                    classicFisher=classic_fisher_result, 
+                    orderBy = 'classicFisher',
+                    topNodes = length(allGO)) %>% 
+      dplyr::mutate(padj = p.adjust(classicFisher, method = "fdr"),
+             fold_enrichment = Significant / Expected,
+             term_coverage = Significant / Annotated) %>% 
+      dplyr::filter(padj < 0.05)
+# None significant
+
+# Save
+write.csv(results_treg_1_fis, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/results_treg_1_fis.csv")
+```
+
+```{r}
+## TopGO Analysis 
+# Cluster 2
+# Gene universe as all genes detected in dataset
+all_treg_genes <- row.names(edger_tregs3)
+write.csv(all_treg_genes, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/all_treg_genes.csv")
+
+# Genes of interest
+interest_treg_genes_2 <- kmeans_genes_treg_edger_2$gene_name
+write.csv(interest_treg_genes_2, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/interest_treg_genes_1.csv")
+
+# Gene-to-GO annotation list 
+gene_2_GO = unstack(anno_mart[, c(1,2)])
+
+# Remove any genes without GO annotation
+keep = interest_treg_genes_2 %in% anno_mart[ ,2]
+keep = which(keep == TRUE)
+interest_treg_genes_2 = interest_treg_genes_2[keep]
+
+# Factor genes of interest (1 = selected, 0 = not selected in topGO)
+geneList = factor(as.integer(all_treg_genes %in% interest_treg_genes_2))
+names(geneList) = all_treg_genes
+geneList
+
+# Build topGO object
+go_data_treg.2 = new("topGOdata", 
+              ontology = "BP", 
+              allGenes = geneList,
+              annot = annFUN.gene2GO, 
+              gene2GO = gene_2_GO)
+ 
+# Run Fisher test
+classic_fisher_result = runTest(go_data_treg.2, algorithm ='classic', statistic ='fisher')
+
+# Generate Gentable 
+allGO = usedGO(go_data_treg.2)
+results_treg_2_fis = GenTable(go_data_treg.2, 
+                    classicFisher=classic_fisher_result, 
+                    orderBy = 'classicFisher',
+                    topNodes = length(allGO)) #%>% 
+      dplyr::mutate(padj = p.adjust(classicFisher, method = "fdr"),
+             fold_enrichment = Significant / Expected,
+             term_coverage = Significant / Annotated) %>% 
+      dplyr::filter(padj < 0.05)
+# None significant
+      
+# Save
+write.csv(results_treg_2_fis, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/results_treg_2_fis.csv")
+```
+
+```{r}
+## Let's explore pairwise comparisons
+# COVID vs ALL other pneumonias (940 genes)
+covid_vs_all_treg <- glmLRT(fit, contrast = contrasts[, "COVIDvsALL"])
+topTags_covid_vs_all_treg <- topTags(covid_vs_all_treg, n = Inf, adjust.method = "fdr")
+topTags_covid_vs_all_treg <- as.data.frame(topTags_covid_vs_all_treg) %>% 
+  rownames_to_column("gene_name")
+
+topTags_covid_vs_all_treg_fdr05 <- topTags_covid_vs_all_treg %>% 
+  filter(FDR < 0.05) # 15 genes
+
+write.csv(topTags_covid_vs_all_treg_fdr05,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_covid_vs_all_treg_fdr05.csv")
+
+## GSEA
+# Obtain gene list
+genes_covid_vs_all_treg <- topTags_covid_vs_all_treg %>% 
+  dplyr::select(gene_name, logFC) %>% 
+  dplyr::group_by(logFC) %>% 
+  dplyr::arrange(desc(logFC)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- genes_covid_vs_all_treg$logFC 
+names(gene_list) <- genes_covid_vs_all_treg$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+# Obtain go files to explore
+go_file_immuno <- gmtPathways("./c7.all.v7.5.1.symbols.gmt")
+go_file_h <- gmtPathways("./h.all.v7.5.1.symbols.gmt")
+
+# Run fgsea analysis
+fgseaRes_treg_h <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+                  as.data.frame() %>% 
+                  dplyr::filter(padj < 0.05) %>%
+                  arrange(desc(NES)) %>% 
+                  dplyr::rename(Count = size)
+
+# Label
+fgseaRes_treg_h$Enrichment = ifelse(fgseaRes_treg_h$NES > 0, "Upregulated", "Downregulated") 
+fgseaRes_treg_h$Enrichment <- factor(fgseaRes_treg_h$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+# Save
+write.csv(fgseaRes_treg_h, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_h.csv")
+write.table(fgseaRes_treg_h, file = "./projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_h.txt", row.names = T, sep = "\t", quote = F) 
+
+# Plot NES
+gsea_treg_h_plot <- ggplot(fgseaRes_treg_h, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "COVID-19 vs Non-COVID-19\npneumonia etiologies (Treg cells)") 
+
+gsea_treg_h_plot
+
+# Save as PDF
+ggsave(gsea_treg_h_plot, filename = "gsea_treg_h_Plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+
+```{r}
+## Let's explore pairwise comparisons
+# COVID vs ALL other pneumonias (940 genes)
+covid_vs_ovp_treg <- glmLRT(fit, contrast = contrasts[, "COVIDvsOVP"])
+topTags_covid_vs_ovp_treg <- topTags(covid_vs_ovp_treg, n = Inf, adjust.method = "fdr")
+topTags_covid_vs_ovp_treg <- as.data.frame(topTags_covid_vs_ovp_treg) %>% 
+  rownames_to_column("gene_name")
+
+topTags_covid_vs_ovp_treg_fdr05 <- topTags_covid_vs_ovp_treg %>% 
+  filter(FDR < 0.05) #11 genes
+
+write.csv(topTags_covid_vs_ovp_treg_fdr05,"/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/topTags_covid_vs_all_treg_fdr05.csv")
+
+## GSEA
+# Obtain gene list
+genes_covid_vs_ovp_treg <- topTags_covid_vs_ovp_treg %>% 
+  dplyr::select(gene_name, logFC) %>% 
+  dplyr::group_by(logFC) %>% 
+  dplyr::arrange(desc(logFC)) %>% 
+  ungroup() 
+
+# Create numeric vector of rank genes based on LFC
+gene_list <- genes_covid_vs_ovp_treg$logFC 
+names(gene_list) <- genes_covid_vs_ovp_treg$gene_name
+gene_list = sort(gene_list, decreasing = TRUE)
+gene_list = gene_list[!duplicated(names(gene_list))]
+
+# Obtain go files to explore
+go_file_immuno <- gmtPathways("./c7.all.v7.5.1.symbols.gmt")
+go_file_h <- gmtPathways("./h.all.v7.5.1.symbols.gmt")
+
+# Run fgsea analysis
+fgseaRes_treg_ovp_h <- fgseaMultilevel(pathways = go_file_h, 
+                                  stats = gene_list,
+                                  minSize=15,
+                                  maxSize=500) %>% 
+                  as.data.frame() %>% 
+                  dplyr::filter(padj < 0.25) %>%
+                  arrange(desc(NES)) %>% 
+                  dplyr::rename(Count = size)
+
+# Label
+fgseaRes_treg_ovp_h$Enrichment = ifelse(fgseaRes_treg_ovp_h$NES > 0, "Upregulated", "Downregulated") 
+fgseaRes_treg_ovp_h$Enrichment <- factor(fgseaRes_treg_ovp_h$Enrichment, levels = c("Upregulated", "Downregulated"))
+
+# Save
+write.csv(fgseaRes_treg_h, "/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_h.csv")
+write.table(fgseaRes_treg_h, file = "./projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/fgseaRes_cd8_h.txt", row.names = T, sep = "\t", quote = F) 
+
+# Plot NES
+gsea_treg_ovp_h_plot <- ggplot(fgseaRes_treg_ovp_h, aes(reorder(pathway, NES), NES)) +
+  geom_point(aes(fill = Enrichment, size = Count), shape = 21) +
+  scale_fill_manual(values = c("Upregulated" = pna_pal[1],
+                               "Downregulated" = pna_pal[2])) +
+  guides(fill = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  scale_size_continuous(range = c(1,8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+    theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 10, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  labs(x = "Pathway", 
+       y = "Normalized Enrichment Score",
+       title = "COVID-19 vs Other\nviral pneumonia (Treg cells)") 
+
+gsea_treg_ovp_h_plot
+
+# Save PDF
+ggsave(gsea_treg_ovp_h_plot, filename = "gsea_treg_ovp_h_plot.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 8, units = "in")
+```
+
+
+
+```{r}
+### Figure patching
+# Patch
+layout <- "AB"
+
+treg_gsea <-  gsea_treg_h_plot + gsea_treg_ovp_h_plot +  
+plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'bottom', legend.direction = "vertical")
+
+treg_gsea 
+
+# Save PDF
+ggsave(treg_gsea, filename = "treg_gsea .pdf", dpi = 300, device = cairo_pdf,
+       width = 14, height = 10, units = "in")
+```
+
+```{r}
+# Patch
+layout <- "AABC
+           AABC
+           AA##
+           DDEF
+           DDEF
+           DD##"
+
+cd8_deconvo_tot <-  cd8_deconvo_ms1_unclust + cd8_ms1_bpplot + cd8_ms1_cov_outdayett +
+                    cd4_deconvo_ms1_unclust + cd4_ms1_bpplot + cd4_ms1_cov_outdayett +
+plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'bottom')
+
+cd8_deconvo_tot
+
+# Save PDF
+ggsave(cd8_deconvo_tot, filename = "cd8_deconvo_tot.pdf", dpi = 300, device = cairo_pdf,
+       width = 20, height = 16, units = "in")
+```
+
+```{r}
+# RNA Supplemental fig 6
+layout <- "AB
+           AB
+           CC
+           CC
+           CC"
+
+rna_sfig.6 <- treg_rna_md + treg_gsea +
+              cd8_deconvo_tot +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout, guides = "collect") & 
+  theme(legend.position = 'right', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 15))
+
+rna_sfig.6
+
+# Save PDF
+ggsave(rna_sfig.6, filename = "rna_sfig.6.pdf", dpi = 300, device = cairo_pdf,
+       width = 28, height = 26, units = "in")
+```
+
+

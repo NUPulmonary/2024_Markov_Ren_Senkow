@@ -1,0 +1,518 @@
+---
+output: html_notebook
+author: Luisa Morales-Nebreda
+goal: generate figures for publicaiton and analyze pt demographics w/i RNA-seq cohort
+---
+
+setwd("/projects/pXXXXX/MoralesNebreda_Lab/projects/COVID_19/rnaseq_analysis/") 
+# Load packages as per "rna_seq_bulk_cd8" file
+
+# Set seed
+set.seed(8271)
+
+
+```{r}
+## Demographics tables
+rna_cd8_dem <- cd8_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified, cell_type2, age, Outcome, gender, mean_sofa, finite_day_of_intubation)
+rownames(rna_cd8_dem) = NULL
+
+rna_cd4_dem <- cd4_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified, cell_type2, age, Outcome, gender, mean_sofa, finite_day_of_intubation)
+rownames(rna_cd4_dem) = NULL
+
+rna_treg_dem <- treg_samples_ordered_2 %>% 
+  dplyr::select(tc_pt_study_id, pna_type_verified, cell_type2, age, Outcome, gender, mean_sofa, finite_day_of_intubation)
+rownames(rna_treg_dem) = NULL
+
+# Join all
+all_rna_dem <- bind_rows(rna_cd8_dem, rna_cd4_dem, rna_treg_dem) %>% 
+  dplyr::mutate(study_id = substr(allu_rna$tc_pt_study_id, 1,4)) %>% 
+    dplyr::mutate(bal_timing = ifelse(finite_day_of_intubation <= 2, "Early", "Late")) %>% 
+    replace_na(list(bal_timing = "Chronically ventilated"))
+
+# Number of samples per patient
+ids <- all_rna_dem %>% 
+  dplyr::count(study_id)
+
+# Number of samples per diagnosis
+dxs <- all_rna_dem %>% 
+  dplyr::select(Diagnosis = pna_type_verified) %>% 
+  count(Diagnosis)
+
+# Factor
+dxs$Diagnosis <- factor(dxs$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot number of samples per pna category
+rna_sample <- ggplot(dxs, aes(x=Diagnosis, y=n, fill=Diagnosis) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of RNA-seq samples")
+
+rna_sample
+
+# Save PDF
+ggsave(rna_sample, filename = "rna_sample.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+```{r}
+# Plot distribution of early vs late samples
+timing_samples_rna <- all_rna_dem %>% 
+  dplyr::count(bal_timing)
+
+# Factor
+timing_samples_rna$bal_timing <- factor(timing_samples_rna$bal_timing, 
+                                        levels = c("Early", "Late", "Chronically ventilated"))
+
+# Plot 
+bal_time_rna <- ggplot(timing_samples_rna, aes(x=bal_timing, y=n, fill=bal_timing) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = c("Early" = outcome_pal[2],
+                               "Late" = outcome_pal[5],
+                               "Chronically ventilated" = outcome_pal[1])) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  scale_x_discrete(labels = c("Early", "Late", "Chronically\nventilated")) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of RNA-seq samples")
+
+bal_time_rna <- bal_time_rna + labs(fill = "Timing of BAL\nrelative to intubation")
+bal_time_rna
+
+# Save PDF
+ggsave(bal_time_rna, filename = "bal_time_rna.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+```{r}
+oc_rna <- all_rna_dem %>% 
+  dplyr::mutate(Patient = study_id, Diagnosis = pna_type_verified) %>% 
+  dplyr::count(Patient, Outcome, Diagnosis) 
+
+#Absolute patient number per diagnosis
+pt_dx_rna <- oc_rna %>%
+  dplyr::count(Diagnosis) 
+
+# Arrange order
+pt_dx_rna$Diagnosis <- factor(pt_dx_rna$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+# Plot number of patients per pna category
+pt_rna <- ggplot(pt_dx_rna, aes(x=Diagnosis, y=n, fill=Diagnosis) ) +
+  geom_bar(stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                               "Other pneumonia" = pna_pal[3],
+                               "COVID-19" = pna_pal[1],
+                               "Other viral pneumonia" = pna_pal[4])) +
+      scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Number of patients")
+
+pt_rna
+
+# Save PDF
+ggsave(pt_rna, filename = "pt_rna.pdf", dpi = 300, device = cairo_pdf,
+       width = 6, height = 7, units = "in")
+```
+
+```{r}
+# Outcome table
+outc_rna <- oc_rna %>%
+  dplyr::count(Outcome)
+
+# Number of patients by simplified outcome and pna category
+dx_outc_rna <- oc_rna %>%
+  dplyr::count(Diagnosis, Outcome)
+
+# Factor
+dx_outc_rna$Diagnosis <- factor(dx_outc_rna$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+dx_outc_rna$Outcome <- factor(dx_outc_rna$Outcome, levels = c("Discharged", "Deceased"))
+
+# Stats
+simple_outcome_rna <- table(all_rna_dem$pna_type_verified, all_rna_dem$Outcome)
+simple_outcome_rna_stats <- pairwise.prop.test(simple_outcome_rna, p.adjust.method = "fdr") # Not significant
+
+# Plot by simplified outcome
+mort_rna <- ggplot(dx_outc_rna, aes(x=Diagnosis, y=n, fill=Outcome) ) +
+  geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("Discharged" = outcome_pal[2],
+                        "Deceased" = outcome_pal[5])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(add = 0.1), breaks = seq(0, 1, by = 0.25)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Mortality (Proportion)")
+
+mort_rna
+
+# Save PDF
+ggsave(mort_rna, filename = "mort_rna.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Sex table
+ sex_rna <- all_rna_dem %>% 
+    dplyr::mutate(Patient = study_id, Diagnosis = pna_type_verified) %>% 
+    dplyr::select(tc_pt_study_id, Patient, Diagnosis, gender)  %>% 
+    distinct(Patient, .keep_all = TRUE)
+  
+  sex_ct_rna <- sex_rna %>%
+    dplyr::count(Diagnosis, gender)
+  
+# Factor
+  sex_ct_rna$Diagnosis <- factor(sex_ct_rna$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+
+  sex_ct_rna$Sex <- factor(sex_ct_rna$gender, levels = c("Female", "Male"))
+  
+# Stats
+  sex_stats_rna <- table(all_rna_dem$pna_type_verified, all_rna_dem$gender)
+  sex_stats_rna <- pairwise.prop.test(sex_stats_rna, p.adjust.method = "fdr") # Not significant
+  
+# Stats
+sex_stats_rna <- table(all_rna_dem$pna_type_verified, all_rna_dem$gender)
+sex_stats_rna <- sex_stats_rna[, 1:2]
+sex_stats_rna <- pairwise.prop.test(sex_stats_rna, p.adjust.method = "fdr") %>% 
+    tidy() %>% 
+    dplyr::filter(p.value < 0.05) %>%
+    dplyr::mutate(annot =  format(p.value, digits = 3, scientific = T),
+                  group = rownames(.),
+                  yval = seq(from = 1.02, by = 0.05, length.out = n()))
+                  
+# Plot by sex
+sex_rna <-  ggplot(sex_ct_rna, aes(x=Diagnosis, y=n, fill=Sex)) +
+    geom_bar(position="fill", stat="identity") + 
+    theme_bw() +
+    theme(axis.text.x = element_text(angle=0, vjust=0.5)) +
+    scale_fill_manual(values = 
+                        c("Female" = outcome_pal[5],
+                          "Male" = outcome_pal[2])) +
+  xlim(0,1) +
+  geom_signif(inherit.aes = F, 
+                data =  sex_stats_rna,
+                aes(xmin = group1, xmax = group2, annotations = annot, y_position = yval),
+                tip_length = 0.0001,
+                textsize = 4, 
+                manual=TRUE) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  # scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+   scale_y_continuous(expand = expansion(add = .05), breaks = seq(0, 1, by = 0.25)) +
+    labs(title="", 
+         subtitle="",
+         x="",
+         y=" Sex (Proportion)")
+  
+sex_rna
+  
+ # Save PDF
+ggsave(sex_rna, filename = "sex_rna.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Plot SOFA scores per sample/pna_category
+ mean_sofa_rna <- all_rna_dem %>% 
+  dplyr::mutate(Patient = study_id, Diagnosis = pna_type_verified) %>% 
+   dplyr::select(tc_pt_study_id, Patient, Diagnosis, mean_sofa) %>% 
+   distinct(Patient, .keep_all = TRUE)
+   
+ 
+ # Factor
+ mean_sofa_rna$Diagnosis <- factor(mean_sofa_rna$Diagnosis, levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+ 
+ 
+# PLot SOFA scores
+ shapiro.test(mean_sofa_rna$mean_sofa)
+ sofa_comp_rna = pairwise.wilcox.test(x = mean_sofa_rna$mean_sofa,
+                                   g = mean_sofa_rna$Diagnosis, 
+                                   p.adjust.method = "fdr") # Not significant
+ 
+ # Plot
+ sofa_rna <- ggplot(mean_sofa_rna, aes(y=mean_sofa, x=Diagnosis)) +
+   geom_boxplot(aes(fill = Diagnosis), outlier.shape = NA) + 
+   geom_point(aes(fill = Diagnosis), position = position_jitterdodge(jitter.width = 0.5)) +
+   theme_bw() +
+   theme(axis.text.x = element_text(angle=0, vjust=0.5)) + 
+   scale_fill_manual(values = c("Non-pneumonia control" = pna_pal[2],
+                                "Other pneumonia" = pna_pal[3],
+                                "COVID-19" = pna_pal[1],
+                                "Other viral pneumonia" = pna_pal[4])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .15))) +
+   labs(title="", 
+        subtitle="",
+        x="",
+        y="Mean SOFA Score")
+ 
+ sofa_rna
+ 
+ # Save PDF
+ggsave(sofa_rna, filename = "sofa_rna.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+```{r}
+# Plot SOFA scores per sample/pna_category
+cell_subset <- all_rna_dem %>% 
+  dplyr::select(tc_pt_study_id, cell_type2, Diagnosis = pna_type_verified) %>% 
+  dplyr::group_by(Diagnosis, cell_type2) %>% 
+  summarise(cts = n()) %>% 
+  dplyr::rename('T cell subset' = cell_type2) %>% 
+  ungroup()
+   
+ 
+# Factor
+cell_subset$Diagnosis <- factor(cell_subset$Diagnosis, 
+                                levels = c("Non-pneumonia control", "Other pneumonia", "COVID-19", "Other viral pneumonia"))
+ 
+cell_subset$`T cell subset` <- factor(cell_subset$`T cell subset`,
+                                      levels = "CD4", "CD8", "Treg")
+ 
+# Plot
+tcell_rna <- ggplot(cell_subset, aes(x=Diagnosis, y=cts, fill=`T cell subset`) ) +
+  geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  scale_fill_manual(values = 
+                      c("CD4" = outcome_pal[2],
+                        "CD8" = outcome_pal[5],
+                        "Treg" = outcome_pal[1])) +
+  scale_x_discrete(labels = c("Non-pneumonia\ncontrol", "Other\npneumonia", "COVID-19", "Other viral\npneumonia")) +
+  theme(text = element_text(family = "Arial"),
+        axis.text = element_text(size = 14, angle=0, vjust= 0.5, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        plot.title = element_text(size = 14, angle=0, vjust= 0, hjust = 0.5)) +
+  scale_y_continuous(expand = expansion(add = 0.1), breaks = seq(0, 1, by = 0.25)) +
+  labs(title="", 
+       subtitle="",
+       x="",
+       y="Proportion")
+
+tcell_rna
+ 
+# Save PDF
+ggsave(tcell_rna, filename = "tcell_rna.pdf", dpi = 300, device = cairo_pdf,
+       width = 11, height = 7, units = "in")
+```
+
+
+```{r}
+# RNA Fig 1
+layout <- "AAAAA#BB
+           AAAAA#BB
+           AAAAA###
+           #CCCCCC#
+           #CCCCCC#
+           #DDDDDD#
+           #DDDDDD#"
+
+rna_fig1.2 <- cd8_rna_md  + gsea_cd8_h +
+            gsea_outcome +
+            gsea_mv.2 +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 20))
+
+rna_fig1.2
+
+# Save PDF
+ggsave(rna_fig1.2, filename = "rna_fig1.2.pdf", dpi = 300, device = cairo_pdf,
+       width = 25, height = 30, units = "in")
+```
+
+```{r}
+# RNA SFig 1
+layout <- "AABBCC
+           DDEEFF"
+
+rna_sfig1 <- pt_rna + tcell_rna + bal_time_rna +
+             sofa_rna + mort_rna + sex_rna +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(legend.position = 'bottom', legend.direction = 'vertical', 
+        plot.tag = element_text(face = 'bold', size = 15))
+
+rna_sfig1
+
+# Save PDF
+ggsave(rna_sfig1, filename = "rna_sfig1.pdf", dpi = 300, device = cairo_pdf,
+       width = 18, height = 16, units = "in")
+```
+
+```{r}
+# Rrrvgo figs
+layout <- "AAAABB"
+
+rrvgo_fig <- rrvgo_plot_cd8.2 + rrvgo_plot_cd8.1 +
+  plot_layout(design = layout)
+
+rrvgo_fig
+              
+# Save PDF
+ggsave(rrvgo_fig, filename = "rrvgo_fig.pdf", dpi = 300, device = cairo_pdf,
+       width = 16, height = 7, units = "in")
+```
+
+```{r}
+# RNA SFig 2
+layout <- "AAAAAAA#BB
+           AAAAAAA#BB
+           AAAAAAA###
+           CCCCCCCCCC
+           CCCCCCCCCC"
+
+rna_sfig2 <- cd8_rna_unclust + gsea_cd8_ovp_h +
+             rrvgo_fig +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(plot.tag = element_text(face = 'bold', size = 15))
+
+rna_sfig2
+              
+# Save PDF
+ggsave(rna_sfig2, filename = "rna_sfig2.pdf", dpi = 300, device = cairo_pdf,
+       width = 20, height = 16, units = "in")
+```
+```{r}
+# IFN fig
+layout <- "A
+           B"
+
+ifn_fig <- cd8_bal_cov_plot  + cd4_bal_cov_plot  +
+  plot_layout(design = layout) & 
+  theme(legend.position = 'bottom', legend.direction = "horizontal")
+
+ifn_fig
+              
+# Save PDF
+ggsave(ifn_fig, filename = "ifn_fig.pdf", dpi = 300, device = cairo_pdf,
+       width = 10, height = 7, units = "in")
+```
+```{r}
+# IFN heatmap fig
+layout <- "AABB"
+
+ifn_hm <- all_rna_ifn + all_rna_ifn_early +
+  plot_layout(design = layout, guides = 'collect') & 
+  theme(legend.position = 'right', legend.direction = "horizontal")
+
+ifn_hm
+              
+# Save PDF
+ggsave(ifn_hm, filename = "ifn_hm.pdf", dpi = 300, device = cairo_pdf,
+       width = 13, height = 9, units = "in")
+```
+
+```{r}
+# RNA SFig 2
+layout <- "AACCCC
+           AACCCC
+           BBCCCC
+           BBCCCC
+           EEFFGG
+           EEFFGG"
+
+rna_sfig3 <- cd4_bal_cov_plot  + cd8_bal_cov_plot  +
+             all_rna_ifn +
+             cts + cts_und + cts_cor +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout, guides = 'collect') & 
+   theme(legend.position = 'bottom', legend.direction = 'vertical',
+         plot.tag = element_text(face = 'bold', size = 14))
+
+rna_sfig3
+              
+# Save PDF
+ggsave(rna_sfig3, filename = "rna_sfig3.pdf", dpi = 300, device = cairo_pdf,
+       width = 22, height = 18, units = "in")
+```
+
+
+```{r}
+# RNA SFig 2
+layout <- "AAAA
+           BBBB
+           CCCC"
+
+rna_sfig4 <- gsea_infection.2 / 
+             gsea_sofa.2 / 
+             gsea_rsc.2 +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(design = layout) & 
+  theme(plot.tag = element_text(face = 'bold', size = 15))
+
+rna_sfig4
+              
+# Save PDF
+ggsave(rna_sfig4, filename = "rna_sfig4.pdf", dpi = 300, device = cairo_pdf,
+       width = 16, height = 22, units = "in")
+```
+
+
+
+
+
