@@ -1,0 +1,7 @@
+git+https://github.com/kmayerb/tcrdist3.git@0.2.2
+pandas
+numpy
+matplotlib
+seaborn
+ipykernel
+
